@@ -1,0 +1,15 @@
+# 生成物
+out/
+data/notes.db
+data/notes.db-journal
+
+# 测试用论文（3MB，需要时重新下载）
+data/papers/
+
+# 工具记忆
+.workbuddy-ai/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
