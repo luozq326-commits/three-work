@@ -1,15 +1,4 @@
-# 生成物
-out/
-data/notes.db
-data/notes.db-journal
-
-# 测试用论文（3MB，需要时重新下载）
-data/papers/
-
-# 工具记忆
-.workbuddy-ai/
-
-# Python
+# 只排除纯机器产物，其余（含 data/、out/、.workbuddy-ai/）全部入库
 __pycache__/
 *.pyc
 .venv/
