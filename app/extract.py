@@ -34,11 +34,16 @@ class Elements:
         return [e for e in self.evidence_checked if e.get("verified")]
 
     def report(self) -> dict:
+        filled = sorted(
+            k for k, v in self.data.items() if k != "evidence" and v not in ("", [], None)
+        )
         return {
             "evidence_total": len(self.evidence_checked),
             "evidence_verified": len(self.verified_evidence()),
             "hit_rate": round(self.hit_rate, 3),
-            "fields": sorted(k for k, v in self.data.items() if v not in ("", [], None)),
+            "fields": filled,
+            # 一个字段都没抽出来，基本是模型把 schema 抄回来后被过滤光了
+            "empty": not filled,
         }
 
 
@@ -85,6 +90,34 @@ def _verify_quote(quote: str, haystack_norm: str) -> dict:
     return {"verified": False, "match": "miss"}
 
 
+# 小模型会把 prompt 里的字段说明原样抄回来当答案，这类值等同于空。
+# 见过的最典型："quote": "支撑该字段的原文英文句子"、"method": ["方法要点，每条一句"]
+_PLACEHOLDER_MARKERS = (
+    "上面的某个字段名",
+    "支撑该字段",
+    "方法要点",
+    "每条一句",
+    "指标名",
+    "对比对象",
+    "这篇论文要解决",
+    "前人方法的不足",
+    "使用的数据集",
+    "评价指标",
+    "创新点，每条",
+    "后续工作方向",
+    "字段名",
+)
+
+
+def _is_placeholder(value) -> bool:
+    s = str(value).strip()
+    if not s:
+        return True
+    if any(m in s for m in _PLACEHOLDER_MARKERS):
+        return True
+    return bool(re.fullmatch(r"<[^>]*>", s))
+
+
 def _coerce(data: dict) -> dict:
     """把小模型常见的结构错误拉回来：该是列表的给了字符串、该是字符串的给了列表。"""
     out = {}
@@ -93,17 +126,28 @@ def _coerce(data: dict) -> dict:
         "gap",
     ):
         v = data.get(key, "")
-        out[key] = v if isinstance(v, str) else (v[0] if isinstance(v, list) and v else "")
+        v = v if isinstance(v, str) else (v[0] if isinstance(v, list) and v else "")
+        out[key] = "" if _is_placeholder(v) else v
     for key in LIST_FIELDS:
         v = data.get(key, [])
         if isinstance(v, str):
             v = [v] if v.strip() else []
-        out[key] = [str(x).strip() for x in v if str(x).strip()]
+        out[key] = [str(x).strip() for x in v if not _is_placeholder(x)]
     for key in DICT_LIST_FIELDS:
         v = data.get(key, [])
         if isinstance(v, dict):
             v = [v]
-        out[key] = [x for x in v if isinstance(x, dict)]
+        kept = []
+        for x in v:
+            if not isinstance(x, dict):
+                continue
+            if key == "evidence":
+                if _is_placeholder(x.get("quote")) or _is_placeholder(x.get("field")):
+                    continue
+            elif _is_placeholder(x.get("metric")) or _is_placeholder(x.get("value")):
+                continue
+            kept.append(x)
+        out[key] = kept
     return out
 
 

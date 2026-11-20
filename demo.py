@@ -61,7 +61,7 @@ def main() -> int:
         print("   术语库为空，写入演示术语")
         terms.seed_demo()
 
-    translated = {}
+    translated: list[tuple] = []
     if not args.no_translate:
         print("=" * 60)
         print("2) 翻译")
@@ -77,7 +77,7 @@ def main() -> int:
             print(f"   [{s.kind}] {s.char_count} 字符")
             try:
                 r = translate.translate_text(s.text)
-                translated[s.kind] = r
+                translated.append((s, r))
                 print(
                     f"     块 {len(r['chunks'])}，{_fmt(r['total_s'])}，"
                     f"{r['tok_per_s']} tok/s，术语一致率 {r['term_rate'] * 100:.0f}%"
@@ -85,6 +85,20 @@ def main() -> int:
             except Exception as exc:
                 print(f"     [失败] {exc}")
         timings["翻译"] = time.perf_counter() - t0
+
+        # 译文落盘。不存的话这 4 分钟的计算就白跑了，界面也没东西可展示
+        if translated:
+            os.makedirs(args.out, exist_ok=True)
+            zh_path = os.path.join(args.out, f"{title}.zh.md")
+            parts = [f"# {title}", "", "> 机器翻译，术语库约束生效；原文为英文，术语一致率见文末。", ""]
+            for s, r in translated:
+                parts += [f"## {s.title}", "", r["full_text"], ""]
+            rate = sum(r["term_rate"] for _, r in translated) / len(translated)
+            bad = sum(len(c["verify"]["violations"]) for _, r in translated for c in r["chunks"])
+            parts += ["---", "", f"术语一致率 {rate * 100:.1f}%，违例 {bad} 处。"]
+            with open(zh_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(parts))
+            print(f"   译文写入 {zh_path}（{sum(s.char_count for s, _ in translated)} 字符）")
 
     print("=" * 60)
     print("3) 要素抽取")
@@ -131,7 +145,7 @@ def main() -> int:
         md = note.build_note(el, title)
         timings["笔记"] = time.perf_counter() - t0
         rate = (
-            sum(r["term_rate"] for r in translated.values()) / len(translated)
+            sum(r["term_rate"] for _, r in translated) / len(translated)
             if translated
             else 1.0
         )

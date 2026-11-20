@@ -224,22 +224,33 @@ def split_sections(pages: list[str]) -> list[Section]:
 
 
 _EXPERIMENT_HINT = re.compile(
-    r"\b(ablation|variation|analys[ie]s|comparison|evaluat|results?|experiment)\b", re.IGNORECASE
+    r"\b(ablations?|variations?|analys[ie]s|comparisons?|evaluations?|results?|experiments?)\b",
+    re.IGNORECASE,
+)
+# 方法章常常起个没关键词的名字（"2 CONVNET CONFIGURATIONS"），靠这几个词兜住
+_METHOD_HINT = re.compile(
+    r"\b(configurations?|frameworks?|architectures?|networks?|methods?|methodology|approach|"
+    r"implementation|training|models?|design)\b",
+    re.IGNORECASE,
 )
 
 
 def _classify(title: str) -> str | None:
     """标题 → 章节类型。认不出返回 None。
 
-    实验/分析类关键词出现在标题任意位置时优先判为 experiment，
-    否则 "6.2 Model Variations" 会被 method 的 "model" 抢走。
+    判定顺序：参考文献 → 实验/分析关键词（任意位置）→ 锚定规则 → 方法关键词（任意位置）。
+    实验必须早于方法，否则 "6.2 Model Variations" 会被 method 的 "model" 抢走。
     """
     t = title.strip()
+    if re.match(r"^(references|bibliography|参考文献)$", t, re.IGNORECASE):
+        return "references"
     if _EXPERIMENT_HINT.search(t):
         return "experiment"
     for kind, pattern in SECTION_RULES:
         if pattern.match(t):
             return kind
+    if _METHOD_HINT.search(t):
+        return "method"
     return None
 
 
