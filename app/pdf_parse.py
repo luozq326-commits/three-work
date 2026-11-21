@@ -90,6 +90,7 @@ class ParsedPaper:
     sections: list[Section] = field(default_factory=list)
     raw_text: str = ""
     backend: str = "layout"
+    ocr_used: bool = False
 
     def section(self, kind: str) -> Section | None:
         for s in self.sections:
@@ -356,20 +357,70 @@ def _text_layer_ok(doc) -> bool:
     return bool(sample) and chars / len(sample) >= 100
 
 
-def parse_pdf(path: str, backend: str = "auto") -> ParsedPaper:
+def ocr_available() -> bool:
+    """有没有可用的 OCR 引擎。RapidOCR 是纯 pip 依赖，不需要装 Tesseract。"""
+    try:
+        import rapidocr_onnxruntime  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+_OCR_ENGINE = None
+
+
+def ocr_image(path: str, lang: str = "ch") -> str:
+    """对单张图片做 OCR，返回纯文本。手机拍照通道走这条路。
+
+    引擎加载要几秒，进程内复用同一个实例，否则每次拍照都要等模型初始化。
+    """
+    global _OCR_ENGINE
+    from rapidocr_onnxruntime import RapidOCR
+
+    if _OCR_ENGINE is None:
+        _OCR_ENGINE = RapidOCR()
+    result, _ = _OCR_ENGINE(path)
+    if not result:
+        return ""
+    # result 每项：[框坐标, 文本, 置信度]
+    return "\n".join(item[1] for item in result if len(item) > 1 and item[1].strip())
+
+
+def parse_pdf(path: str, backend: str = "auto", ocr: bool = True) -> ParsedPaper:
     """解析一篇 PDF。
 
     backend:
       "auto"   —— 有 pymupdf4llm 就用 layout，否则用 blocks
-      "layout" —— 强制版面模型（慢约 0.7s/页，质量最好）
+      "layout" —— 强制版面模型（慢约 0.9s/页，质量最好）
       "blocks" —— 强制文本块启发式（快，双栏可能串行）
+    ocr:
+      True  —— 无文本层时自动走 OCR（约 30~60s/页，慢但能读扫描件）
+      False —— 只标记 needs_ocr，不 OCR
     """
     doc = pymupdf.open(path)
     try:
         page_count = doc.page_count
         if not _text_layer_ok(doc):
+            if not (ocr and _HAS_4LLM and ocr_available()):
+                return ParsedPaper(
+                    path=path, page_count=page_count, needs_ocr=True, backend="none"
+                )
+            # 扫描件：版面模型会对图片页调用 RapidOCR
+            pages_md = _md_pages(doc)
+            raw = "\n".join("\n".join(t for _, t in _md_to_lines(md)) for md in pages_md)
+            if not raw.strip():
+                return ParsedPaper(
+                    path=path, page_count=page_count, needs_ocr=True, backend="none"
+                )
             return ParsedPaper(
-                path=path, page_count=page_count, needs_ocr=True, backend="none"
+                path=path,
+                page_count=page_count,
+                needs_ocr=True,
+                sections=split_sections_md(pages_md),
+                raw_text=raw,
+                backend="ocr",
+                ocr_used=True,
             )
 
         use_layout = backend == "layout" or (backend == "auto" and _HAS_4LLM)

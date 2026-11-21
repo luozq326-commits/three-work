@@ -30,6 +30,7 @@ import mimetypes
 import os
 import re
 import shutil
+import socket
 import threading
 import time
 import traceback
@@ -38,7 +39,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from app import config, extract, llm, note, pdf_parse, terms, translate
+from app import config, extract, llm, note, pdf_parse, search, terms, translate
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(ROOT, "web", "static")
@@ -51,6 +52,18 @@ MAX_UPLOAD = 80 * 1024 * 1024  # 80MB，够放一篇带图的论文
 TASKS: dict[str, dict] = {}
 TASK_LOCK = threading.Lock()
 LAST_TASK_ID: str | None = None  # 刷新页面后还能接回上一次的结果
+
+
+def _lan_ip() -> str:
+    """本机在局域网里的地址。UDP connect 不会真的发包，只用来让系统选出口网卡。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("223.5.5.5", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
 
 
 # ---------------------------------------------------------------- 任务执行
@@ -242,6 +255,40 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self._file(os.path.join(STATIC, "index.html"))
             return
+        if path in ("/mobile", "/mobile.html"):
+            self._file(os.path.join(STATIC, "mobile.html"))
+            return
+        if path == "/api/qr":
+            text = (q.get("text") or [""])[0]
+            if not text:
+                self._json({"error": "text 必填"}, 400)
+                return
+            try:
+                import io
+
+                import qrcode
+
+                img = qrcode.make(text)
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                data = buf.getvalue()
+            except Exception as exc:
+                self._json({"error": f"生成二维码失败：{exc}"}, 500)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if path == "/api/lan":
+            self._json({"url": f"http://{_lan_ip()}:{self.server.server_address[1]}/mobile"})
+            return
+        if path == "/api/search":
+            query = (q.get("q") or [""])[0]
+            top_k = int((q.get("k") or ["5"])[0])
+            self._json(search.search(query, top_k=top_k))
+            return
         if path == "/api/health":
             self._json(
                 {
@@ -373,6 +420,65 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"deleted": n})
             return
 
+        if path == "/api/mobile/ocr":
+            name = (q.get("name") or ["photo.jpg"])[0]
+            name = re.sub(r"[^\w.\-]", "_", os.path.basename(name)) or "photo.jpg"
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0:
+                self._json({"error": "空文件"}, 400)
+                return
+            if length > MAX_UPLOAD:
+                self._json({"error": "图片过大"}, 400)
+                return
+            dest = os.path.join(UPLOADS, f"shot_{int(time.time())}_{name}")
+            with open(dest, "wb") as f:
+                remaining = length
+                while remaining > 0:
+                    chunk = self.rfile.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    remaining -= len(chunk)
+            t0 = time.perf_counter()
+            try:
+                text = pdf_parse.ocr_image(dest)
+            except Exception as exc:
+                self._json({"error": f"OCR 失败：{exc}"}, 500)
+                return
+            self._json(
+                {
+                    "text": text,
+                    "chars": len(text),
+                    "seconds": round(time.perf_counter() - t0, 1),
+                }
+            )
+            return
+
+        if path == "/api/mobile/translate":
+            data = self._body()
+            text = (data.get("text") or "").strip()
+            if not text:
+                self._json({"error": "text 必填"}, 400)
+                return
+            try:
+                r = translate.translate_text(text)
+            except Exception as exc:
+                self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+                return
+            self._json(
+                {
+                    "zh": r["full_text"],
+                    "chunks": len(r["chunks"]),
+                    "term_rate": r["term_rate"],
+                    "seconds": r["total_s"],
+                }
+            )
+            return
+
+        if path == "/api/search/index":
+            self._json(search.index_all(force=bool((self._body() or {}).get("force"))))
+            return
+
         if path == "/api/terms/candidates":
             data = self._body()
             text = (data.get("text") or "").strip()
@@ -400,15 +506,36 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> int:
     ap = argparse.ArgumentParser(description="本地网页界面")
     ap.add_argument("--port", type=int, default=8000)
-    ap.add_argument("--host", default="127.0.0.1", help="默认只监听本机，不要改成 0.0.0.0")
+    ap.add_argument("--host", default="127.0.0.1", help="默认只监听本机")
+    ap.add_argument(
+        "--lan",
+        action="store_true",
+        help="同时允许局域网访问（手机拍照通道需要），会监听 0.0.0.0",
+    )
     args = ap.parse_args()
+    host = "0.0.0.0" if args.lan else args.host
 
     if not llm.health():
         print(f"[警告] 模型服务 {config.BASE_URL} 没响应，界面能打开但跑不了任务")
         print('       启动：export OLLAMA_MODELS="E:/模型" && "/e/模型/Ollama/ollama.exe" serve')
 
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"界面已启动：http://{args.host}:{args.port}")
+    # 启动时给笔记建索引：没有索引的话跨文献检索是空的，用户会以为功能坏了
+    def _index():
+        try:
+            stat = search.index_all()
+            if stat["indexed"]:
+                print(f"检索索引：新增 {stat['indexed']} 条笔记 / {stat['chunks']} 个小节")
+        except Exception as exc:
+            print(f"[警告] 建检索索引失败：{exc}")
+
+    threading.Thread(target=_index, daemon=True).start()
+
+    srv = ThreadingHTTPServer((host, args.port), Handler)
+    print(f"界面已启动：http://127.0.0.1:{args.port}")
+    if args.lan:
+        print(f"手机拍照：http://{_lan_ip()}:{args.port}/mobile")
+    else:
+        print("（手机拍照通道需加 --lan 启动）")
     print(f"模型：{config.MAIN_MODEL}　术语库：{len(terms.all_terms())} 条")
     print("Ctrl+C 停止")
     try:

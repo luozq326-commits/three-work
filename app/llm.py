@@ -119,6 +119,43 @@ def _strip_fence(text: str) -> str:
     return t.strip()
 
 
+def embed(texts: list[str], model: str | None = None, timeout: int = 60) -> list[list[float]]:
+    """文本向量。用于跨文献笔记检索。
+
+    向量服务不可用时抛 LLMError，调用方负责降级到关键词检索。
+    """
+    model = model or config.EMBED_MODEL
+    out: list[list[float]] = []
+    for t in texts:
+        if config.BACKEND == "ollama":
+            data = _post(
+                f"{config.BASE_URL}/api/embeddings",
+                {"model": model, "prompt": t[:4000]},
+                timeout,
+            )
+            vec = data.get("embedding") or []
+        else:
+            data = _post(
+                f"{config.BASE_URL}/v1/embeddings",
+                {"model": model, "input": t[:4000]},
+                timeout,
+            )
+            vec = (data.get("data") or [{}])[0].get("embedding") or []
+        if not vec:
+            raise LLMError(f"向量模型 {model} 返回空向量，先 ollama pull {model}")
+        out.append(vec)
+    return out
+
+
+def embed_ready(model: str | None = None) -> bool:
+    """向量模型是否可用（避免每次检索都等超时）。"""
+    model = model or config.EMBED_MODEL
+    try:
+        return any(m == model or m.startswith(model + ":") for m in list_models())
+    except Exception:
+        return False
+
+
 def chat_json(messages: list[dict], retries: int = 1, **kwargs) -> dict:
     """要求模型输出 JSON，失败自动重试。
 

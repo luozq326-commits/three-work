@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>拍论文 · 端侧精读</title>
+<style>
+  :root{--bg:#0f1115;--panel:#171a21;--line:#262b36;--text:#e6e9ef;--muted:#8b93a7;
+    --accent:#6ea8fe;--ok:#3fb950;--bad:#f85149}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{overflow-x:hidden}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:16px/1.7 -apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    padding:18px 16px 40px;max-width:720px;margin:0 auto;width:100%}
+  h1{font-size:19px;margin:6px 0 2px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+  .btn{display:block;width:100%;padding:16px;border-radius:12px;border:1px solid var(--line);
+    background:var(--panel);color:var(--text);font-size:16px;font-weight:600;margin-bottom:12px;
+    text-align:center}
+  .btn.primary{background:var(--accent);color:#08111f;border-color:var(--accent)}
+  .btn:disabled{opacity:.45}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:14px;margin-bottom:14px}
+  .card h2{font-size:13px;color:var(--muted);margin:0 0 8px;font-weight:600;letter-spacing:.04em}
+  .txt{white-space:pre-wrap;font-size:15px;line-height:1.8;max-height:38vh;overflow:auto}
+  .txt.en{font-family:ui-serif,Georgia,serif;color:#a8b0c0}
+  .meta{color:var(--muted);font-size:12px;margin-top:8px}
+  .hide{display:none}
+  #imgPrev{width:100%;border-radius:10px;margin-bottom:12px}
+  .tip{color:var(--muted);font-size:12.5px;line-height:1.7}
+  .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--line);
+    border-top-color:var(--accent);border-radius:50%;animation:r .8s linear infinite;
+    vertical-align:-2px;margin-right:8px}
+  @keyframes r{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<h1>拍论文</h1>
+<div class="sub">手机只负责拍照，识别和翻译都在这台电脑上跑</div>
+
+<label class="btn primary" for="cam">拍照</label>
+<input id="cam" type="file" accept="image/*" capture="environment" hidden>
+<label class="btn" for="gal">从相册选</label>
+<input id="gal" type="file" accept="image/*" hidden>
+
+<img id="imgPrev" class="hide">
+<div class="card hide" id="ocrCard">
+  <h2>识别结果（可手动修正）</h2>
+  <textarea id="ocrText" class="txt en" style="width:100%;height:26vh;background:transparent;
+    border:none;color:#a8b0c0;font-family:ui-serif,Georgia,serif;outline:none;resize:vertical"></textarea>
+  <div class="meta" id="ocrMeta"></div>
+</div>
+
+<button class="btn primary hide" id="btnTr">翻译成中文</button>
+
+<div class="card hide" id="trCard">
+  <h2>译文</h2>
+  <div class="txt" id="trText"></div>
+  <div class="meta" id="trMeta"></div>
+</div>
+
+<div class="tip" id="tip">提示：一页一页拍，字要清楚、别歪、别反光。整页论文约 40~60 秒。</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let lastFile = null;
+
+function setBusy(on, label){
+  document.querySelectorAll('.btn').forEach(b => b.disabled = on);
+  if(on) $('#tip').innerHTML = `<span class="spin"></span>${label}`;
+  else $('#tip').textContent = '提示：一页一页拍，字要清楚、别歪、别反光。';
+}
+
+async function handle(file){
+  if(!file) return;
+  lastFile = file;
+  $('#imgPrev').src = URL.createObjectURL(file);
+  $('#imgPrev').classList.remove('hide');
+  $('#ocrCard').classList.remove('hide');
+  $('#ocrText').value = '';
+  $('#ocrMeta').textContent = '识别中…';
+  setBusy(true, '正在识别文字（首次会加载模型，稍慢）');
+  try{
+    const r = await fetch('/api/mobile/ocr?name=' + encodeURIComponent(file.name || 'photo.jpg'),
+      {method:'POST', body:file});
+    const j = await r.json();
+    if(j.error) throw new Error(j.error);
+    $('#ocrText').value = j.text || '';
+    $('#ocrMeta').textContent = `${(j.text||'').length} 字符 · ${j.seconds.toFixed(1)} 秒`;
+    $('#btnTr').classList.toggle('hide', !(j.text||'').trim());
+  }catch(e){
+    $('#ocrMeta').textContent = '识别失败：' + e.message;
+  }finally{ setBusy(false); }
+}
+
+$('#cam').onchange = e => handle(e.target.files[0]);
+$('#gal').onchange = e => handle(e.target.files[0]);
+
+$('#btnTr').onclick = async () => {
+  const text = $('#ocrText').value.trim();
+  if(!text) return;
+  setBusy(true, '正在翻译…');
+  try{
+    const r = await fetch('/api/mobile/translate', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})});
+    const j = await r.json();
+    if(j.error) throw new Error(j.error);
+    $('#trText').textContent = j.zh;
+    $('#trCard').classList.remove('hide');
+    $('#trMeta').textContent =
+      `术语一致率 ${(j.term_rate*100).toFixed(0)}% · ${j.chunks} 块 · ${j.seconds.toFixed(1)} 秒`;
+    $('#trCard').scrollIntoView({behavior:'smooth'});
+  }catch(e){
+    alert('翻译失败：' + e.message);
+  }finally{ setBusy(false); }
+};
+</script>
+</body>
+</html>
