@@ -310,3 +310,14 @@ def accept_candidates(candidates: list[dict], domain: str = "general") -> int:
         add_term(c["source"], c["target"], domain=domain, origin="auto")
         n += 1
     return n
+
+
+def delete_term(source: str) -> int:
+    """删除一条术语及其变体。返回删除条数。"""
+    with _conn() as conn:
+        row = conn.execute("SELECT id FROM term WHERE source = ?", (source.strip(),)).fetchone()
+        if not row:
+            return 0
+        conn.execute("DELETE FROM variant WHERE term_id = ?", (row["id"],))
+        conn.execute("DELETE FROM term WHERE id = ?", (row["id"],))
+        return 1

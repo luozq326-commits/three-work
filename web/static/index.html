@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PaperReader · 端侧文献精读</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel-2:#1c2029; --line:#262b36;
+    --text:#e6e9ef; --muted:#8b93a7; --dim:#5f6675;
+    --accent:#6ea8fe; --accent-dim:#2b4a7d;
+    --ok:#3fb950; --warn:#d29922; --bad:#f85149;
+    --radius:10px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  button{font:inherit; cursor:pointer; border-radius:7px; border:1px solid var(--line);
+    background:var(--panel-2); color:var(--text); padding:7px 13px; transition:.15s}
+  button:hover{border-color:var(--accent-dim); background:#222834}
+  button.primary{background:var(--accent); color:#08111f; border-color:var(--accent); font-weight:600}
+  button.primary:hover{background:#8ab8ff}
+  button:disabled{opacity:.45; cursor:not-allowed}
+  button.ghost{background:transparent}
+  input,select,textarea{font:inherit; background:var(--panel-2); color:var(--text);
+    border:1px solid var(--line); border-radius:7px; padding:7px 10px; outline:none}
+  input:focus,select:focus,textarea:focus{border-color:var(--accent-dim)}
+
+  /* 顶栏 */
+  header{display:flex; align-items:center; gap:14px; padding:10px 16px;
+    border-bottom:1px solid var(--line); background:var(--panel); flex:none}
+  .logo{font-weight:700; letter-spacing:.3px}
+  .logo span{color:var(--accent)}
+  .status{display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12.5px}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--dim)}
+  .dot.on{background:var(--ok); box-shadow:0 0 0 3px rgba(63,185,80,.15)}
+  .dot.off{background:var(--bad)}
+  header .spacer{flex:1}
+  .range{display:flex; gap:6px; align-items:center; font-size:12.5px; color:var(--muted)}
+  .range select{padding:5px 8px}
+
+  /* 进度条 */
+  #bar{height:2px; background:var(--line); flex:none; overflow:hidden}
+  #bar > i{display:block; height:100%; width:0; background:var(--accent); transition:width .4s}
+
+  /* 主区 */
+  main{flex:1; display:grid; grid-template-columns:250px minmax(0,1fr) 390px; min-height:0}
+  .col{overflow-y:auto; min-height:0}
+  .col.left{border-right:1px solid var(--line); background:var(--panel)}
+  .col.right{border-left:1px solid var(--line); background:var(--panel)}
+  .col.center{background:var(--bg); scroll-behavior:smooth}
+
+  .sec-head{padding:12px 14px 6px; font-size:11.5px; letter-spacing:.08em;
+    color:var(--dim); text-transform:uppercase}
+  .toc-item{padding:8px 14px; cursor:pointer; border-left:2px solid transparent;
+    display:flex; gap:8px; align-items:baseline}
+  .toc-item:hover{background:#1d222c}
+  .toc-item.active{border-left-color:var(--accent); background:#1d2330}
+  .toc-item .k{font-size:10.5px; padding:1px 6px; border-radius:4px; background:#252b37;
+    color:var(--muted); flex:none}
+  .toc-item .t{font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .toc-item .n{margin-left:auto; font-size:11px; color:var(--dim); flex:none}
+  .toc-item.done .n{color:var(--ok)}
+
+  /* 阅读区 */
+  .paper-title{padding:22px 34px 6px; font-size:19px; font-weight:650}
+  .paper-meta{padding:0 34px 16px; color:var(--muted); font-size:12.5px}
+  .card{margin:0 34px 18px; border:1px solid var(--line); border-radius:var(--radius);
+    background:var(--panel); overflow:hidden}
+  .card-h{display:flex; align-items:center; gap:10px; padding:10px 16px;
+    border-bottom:1px solid var(--line); background:var(--panel-2); font-size:13px}
+  .card-h .k{font-size:10.5px; padding:1px 6px; border-radius:4px; background:#2a3140; color:var(--muted)}
+  .card-h .rate{margin-left:auto; font-size:11.5px; color:var(--muted)}
+  .card-b{padding:14px 16px; display:grid; gap:14px}
+  .pair{display:grid; gap:6px}
+  .pair .lab{font-size:11px; color:var(--dim); letter-spacing:.05em}
+  .src{color:#a8b0c0; font-size:13px; font-family:ui-serif,Georgia,serif; line-height:1.7}
+  .dst{color:var(--text); font-size:14px; line-height:1.85; white-space:pre-wrap}
+  .empty{padding:60px 34px; color:var(--muted); text-align:center; line-height:2}
+  .empty kbd{background:var(--panel-2); border:1px solid var(--line); border-radius:5px;
+    padding:1px 6px; font-size:12px}
+  .warnbox{margin:0 34px 16px; padding:10px 14px; border-radius:8px;
+    background:rgba(210,153,34,.1); border:1px solid rgba(210,153,34,.35);
+    color:#e3c07a; font-size:12.5px}
+
+  /* 右栏 */
+  .panel-block{padding:12px 16px; border-bottom:1px solid var(--line)}
+  .panel-block h3{margin:0 0 8px; font-size:12px; color:var(--muted); font-weight:600;
+    letter-spacing:.05em}
+  .field{margin-bottom:9px}
+  .field .fl{font-size:11px; color:var(--dim); margin-bottom:2px}
+  .field .fv{font-size:13px; line-height:1.6; white-space:pre-wrap}
+  .field ul{margin:0; padding-left:16px}
+  .field li{margin-bottom:3px}
+  .chip{display:inline-block; font-size:11px; padding:1px 7px; border-radius:20px;
+    background:#252b37; color:var(--muted); margin:0 4px 4px 0}
+  .chip.ok{background:rgba(63,185,80,.12); color:var(--ok)}
+  .chip.bad{background:rgba(248,81,73,.12); color:var(--bad)}
+  .ev{padding:7px 0; border-bottom:1px dashed var(--line); font-size:12px; color:#9aa3b4;
+    font-family:ui-serif,Georgia,serif}
+  .ev:last-child{border-bottom:none}
+  .ev b{color:var(--muted); font-weight:500; font-family:inherit; font-size:11px}
+  .note-md{padding:12px 16px; font-size:13px; line-height:1.8}
+  .note-md h1,.note-md h2,.note-md h3{font-size:14px; margin:14px 0 6px; color:var(--accent)}
+  .note-md h1{font-size:15px}
+  .note-md ul{padding-left:18px; margin:6px 0}
+  .note-md li{margin-bottom:3px}
+
+  /* 弹层 */
+  .mask{position:fixed; inset:0; background:rgba(0,0,0,.55); display:none;
+    align-items:center; justify-content:center; z-index:50}
+  .mask.show{display:flex}
+  .modal{width:min(880px,92vw); max-height:84vh; background:var(--panel);
+    border:1px solid var(--line); border-radius:12px; display:flex; flex-direction:column;
+    box-shadow:0 24px 60px rgba(0,0,0,.5)}
+  .modal-h{display:flex; align-items:center; gap:10px; padding:14px 18px;
+    border-bottom:1px solid var(--line)}
+  .modal-h h2{margin:0; font-size:15px}
+  .modal-h .spacer{flex:1}
+  .modal-b{padding:16px 18px; overflow:auto}
+  table{width:100%; border-collapse:collapse; font-size:13px}
+  th,td{text-align:left; padding:7px 8px; border-bottom:1px solid var(--line)}
+  th{color:var(--muted); font-weight:500; font-size:12px}
+  td button{padding:3px 9px; font-size:12px}
+  .row{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px}
+  .row input{flex:1; min-width:110px}
+  .toast{position:fixed; bottom:22px; left:50%; transform:translateX(-50%) translateY(20px);
+    background:var(--panel-2); border:1px solid var(--line); color:var(--text);
+    padding:9px 16px; border-radius:8px; opacity:0; transition:.25s; pointer-events:none; z-index:99}
+  .toast.show{opacity:1; transform:translateX(-50%)}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#2a303c; border-radius:6px}
+  ::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">Paper<span>Reader</span></div>
+  <div class="status"><i class="dot" id="dot"></i><span id="modelTxt">检查模型…</span></div>
+  <div class="spacer"></div>
+  <div class="range">
+    翻译范围
+    <select id="range">
+      <option value="core">摘要 + 方法 + 实验</option>
+      <option value="all">全文（较慢）</option>
+      <option value="abstract">仅摘要（最快）</option>
+    </select>
+  </div>
+  <button id="btnTerms" class="ghost">术语库</button>
+  <button id="btnNotes" class="ghost">历史笔记</button>
+  <button id="btnPick" class="primary">选择 PDF</button>
+  <input type="file" id="file" accept="application/pdf" hidden>
+</header>
+<div id="bar"><i></i></div>
+
+<main>
+  <div class="col left">
+    <div class="sec-head">章节</div>
+    <div id="toc"></div>
+  </div>
+  <div class="col center" id="center">
+    <div class="empty" id="empty">
+      选一篇英文论文 PDF 开始<br>
+      <span style="font-size:12.5px">解析 → 翻译 → 要素抽取 → 笔记，全部在本机完成</span><br><br>
+      <kbd>提示</kbd> 演示前先跑一次 <kbd>warmup.py</kbd>，省掉 4 秒模型加载
+    </div>
+  </div>
+  <div class="col right" id="right">
+    <div class="panel-block">
+      <h3>结构化要素</h3>
+      <div class="field"><div class="fv" style="color:var(--muted)">尚未处理论文</div></div>
+    </div>
+  </div>
+</main>
+
+<div class="mask" id="mask">
+  <div class="modal">
+    <div class="modal-h">
+      <h2 id="modalTitle">术语库</h2>
+      <div class="spacer"></div>
+      <button class="ghost" id="modalClose">关闭</button>
+    </div>
+    <div class="modal-b" id="modalBody"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const el = (tag, cls, txt) => { const n = document.createElement(tag);
+  if (cls) n.className = cls; if (txt !== undefined) n.textContent = txt; return n; };
+const KIND_CN = {abstract:'摘要',introduction:'引言',related:'相关工作',method:'方法',
+  experiment:'实验',discussion:'讨论',conclusion:'结论',acknowledg:'致谢',
+  references:'参考文献',appendix:'附录',other:'其他',front:'题名页'};
+
+let task = null, timer = null, currentFile = null;
+
+function toast(msg, ms=2200){
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('show'), ms);
+}
+async function api(url, opt={}){
+  const r = await fetch(url, opt);
+  const ct = r.headers.get('content-type') || '';
+  if (ct.includes('json')) return r.json();
+  return r.text();
+}
+function setBar(p){ $('#bar > i').style.width = Math.max(0, Math.min(1, p)) * 100 + '%'; }
+
+/* ---------- 健康检查 ---------- */
+async function health(){
+  try{
+    const h = await api('/api/health');
+    const dot = $('#dot');
+    dot.className = 'dot ' + (h.ok ? 'on' : 'off');
+    $('#modelTxt').textContent = h.ok
+      ? `${h.model} · 术语 ${h.terms} 条`
+      : `模型未启动（${h.base_url}）`;
+  }catch(e){
+    $('#dot').className='dot off'; $('#modelTxt').textContent='服务异常';
+  }
+}
+
+/* ---------- 选文件 ---------- */
+$('#btnPick').onclick = () => $('#file').click();
+$('#file').onchange = async e => {
+  const f = e.target.files[0]; if(!f) return;
+  currentFile = f;
+  $('#btnPick').disabled = true; $('#btnPick').textContent = '上传中…';
+  try{
+    const r = await fetch('/api/upload?name=' + encodeURIComponent(f.name), {method:'POST', body:f});
+    const j = await r.json();
+    if(j.error) throw new Error(j.error);
+    await start(j.path);
+  }catch(err){ toast('上传失败：' + err.message, 3500); }
+  finally{ $('#btnPick').disabled=false; $('#btnPick').textContent='选择 PDF'; }
+};
+
+function kindsFor(range){
+  if(range === 'abstract') return ['abstract'];
+  if(range === 'all') return ['abstract','introduction','related','method','experiment',
+    'discussion','conclusion','appendix','other','front'];
+  return ['abstract','introduction','method','experiment','conclusion'];
+}
+
+async function start(path){
+  const kinds = kindsFor($('#range').value);
+  const r = await api('/api/run', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({path, kinds})});
+  if(r.error){ toast(r.error, 3500); return; }
+  task = {id:r.task_id, status:'running', progress:0, sections:[], stage:'解析', stage_index:1};
+  $('#center').innerHTML = '<div class="empty">正在解析 PDF…</div>';
+  $('#toc').innerHTML = ''; $('#right').innerHTML = '';
+  setBar(0.02);
+  clearInterval(timer); timer = setInterval(poll, 700);
+}
+
+async function poll(){
+  if(!task) return;
+  const t = await api('/api/task/' + task.id);
+  if(t.error) return;
+  task = t;
+  setBar(t.progress || 0);
+  renderToc(t);
+  if(t.status === 'running'){
+    const label = `${t.stage}（${t.stage_index}/${t.stage_total}）`;
+    if(!$('#runningTip')){
+      $('#center').innerHTML = `<div class="empty" id="runningTip">${label}…<br>
+        <span style="font-size:12.5px">翻译按章节推进，已完成的章节会陆续出现</span></div>`;
+    }else{ $('#runningTip').firstChild.textContent = label + '…'; }
+    renderRead(t, true);
+  }else if(t.status === 'done'){
+    clearInterval(timer); timer = null; setBar(1);
+    renderRead(t, false); renderRight(t);
+    toast('处理完成，笔记已保存');
+  }else if(t.status === 'error'){
+    clearInterval(timer); timer = null;
+    $('#center').innerHTML = `<div class="empty">处理失败<br>
+      <span style="color:var(--bad)">${t.error || '未知错误'}</span></div>`;
+  }
+}
+
+/* ---------- 渲染：章节列表 ---------- */
+function renderToc(t){
+  const box = $('#toc'); if(!t.sections || !t.sections.length) return;
+  const sig = t.sections.map(s => s.translation ? 1 : 0).join('');
+  if(box.dataset.sig === sig) return;
+  box.dataset.sig = sig; box.innerHTML = '';
+  t.sections.forEach((s, i) => {
+    const it = el('div', 'toc-item' + (s.translation ? ' done' : ''));
+    it.dataset.idx = i;
+    it.append(el('span','k', KIND_CN[s.kind] || s.kind));
+    it.append(el('span','t', s.title));
+    it.append(el('span','n', s.translation ? '已译' : s.chars + '字'));
+    it.onclick = () => {
+      document.querySelectorAll('.toc-item').forEach(x=>x.classList.remove('active'));
+      it.classList.add('active');
+      const card = document.getElementById('sec-' + i);
+      if(card) card.scrollIntoView({block:'start'});
+    };
+    box.append(it);
+  });
+}
+
+/* ---------- 渲染：正文对照 ---------- */
+function renderRead(t, streaming){
+  if(!t.sections || !t.sections.length) return;
+  const center = $('#center');
+  // 内容没变化就不重绘：轮询期间整块重绘会把阅读位置弹回顶部
+  const done = t.sections.filter(s => s.translation).length;
+  const sig = [t.sections.length, streaming ? 1 : 0, done, t.status].join('|');
+  if(center.dataset.sig === sig) return;
+  center.dataset.sig = sig;
+  const keepY = center.scrollTop;
+
+  let html = `<div class="paper-title">${t.title || ''}</div>
+    <div class="paper-meta">${t.pages || '—'} 页 · 解析后端 ${t.backend || '—'} ·
+    ${t.sections.length} 个章节 · 已译 ${done} 章</div>`;
+  if(streaming) html += `<div class="warnbox">正在翻译，可以先读已完成的章节。全文约需 4~6 分钟。</div>`;
+  t.sections.forEach((s, i) => {
+    if(!s.translation && streaming) return;
+    html += `<div class="card" id="sec-${i}">
+      <div class="card-h">
+        <span class="k">${KIND_CN[s.kind] || s.kind}</span>
+        <span>${escapeHtml(s.title)}</span>
+        ${s.term_rate !== null && s.term_rate !== undefined
+          ? `<span class="rate">一致率 ${(s.term_rate*100).toFixed(0)}%${
+              s.violations ? ` · 违例 ${s.violations}` : ''} · ${s.chunks||0} 块 · ${(s.seconds||0).toFixed(1)}s</span>`
+          : ''}
+      </div>
+      <div class="card-b">
+        <div class="pair"><div class="lab">原文</div><div class="src">${escapeHtml(s.text)}</div></div>
+        ${s.translation ? `<div class="pair"><div class="lab">译文</div><div class="dst">${escapeHtml(s.translation)}</div></div>` : ''}
+        ${s.error ? `<div class="field"><div class="fv" style="color:var(--bad)">翻译失败：${escapeHtml(s.error)}</div></div>` : ''}
+      </div></div>`;
+  });
+  center.innerHTML = html;
+  center.scrollTop = keepY;
+}
+
+/* ---------- 渲染：右栏要素 ---------- */
+function renderRight(t){
+  const right = $('#right');
+  const e = t.elements; if(!e) return;
+  const f = e.fields || {};
+  const rep = e.report || {};
+  const list = v => Array.isArray(v) && v.length
+    ? '<ul>' + v.map(x => `<li>${escapeHtml(typeof x === 'string' ? x : JSON.stringify(x))}</li>`).join('') + '</ul>'
+    : '<span style="color:var(--dim)">—</span>';
+
+  let html = `<div class="panel-block">
+    <h3>质量</h3>
+    <span class="chip ${rep.hit_rate >= 0.9 ? 'ok' : 'bad'}">证据命中 ${(rep.hit_rate*100||0).toFixed(0)}%</span>
+    <span class="chip">${rep.evidence_verified}/${rep.evidence_total} 条</span>
+    <span class="chip">${(rep.fields||[]).length} 字段</span>
+    <div style="margin-top:8px;color:var(--dim);font-size:11.5px">
+      ${Object.entries(t.timings||{}).map(([k,v])=>`${k} ${v.toFixed(1)}s`).join(' · ')}
+    </div>
+  </div>
+  <div class="panel-block"><h3>一句话总结</h3>
+    <div class="field"><div class="fv">${escapeHtml(f.research_question || '—')}</div></div>
+    <div class="field"><div class="fl">前人不足</div>
+      <div class="fv">${escapeHtml(f.gap || '—')}</div></div>
+  </div>
+  <div class="panel-block"><h3>方法要点</h3><div class="field">${list(f.method)}</div></div>
+  <div class="panel-block"><h3>数据与指标</h3>
+    <div class="field"><div class="fl">数据集</div><div class="fv">${list(f.dataset)}</div></div>
+    <div class="field"><div class="fl">指标</div><div class="fv">${list(f.metrics)}</div></div>
+    <div class="field"><div class="fl">关键数字</div>
+      ${Array.isArray(f.key_results) && f.key_results.length
+        ? f.key_results.map(k => `<div class="fv">· ${escapeHtml(k.metric||'')}：<b>${escapeHtml(String(k.value||''))}</b>${k.baseline?`（对比 ${escapeHtml(k.baseline)}）`:''}</div>`).join('')
+        : '<span style="color:var(--dim)">—</span>'}
+    </div>
+  </div>
+  <div class="panel-block"><h3>创新点</h3><div class="field">${list(f.novelty)}</div></div>
+  <div class="panel-block"><h3>局限与疑问</h3><div class="field">${list(f.limitations)}</div></div>
+  <div class="panel-block"><h3>原文依据</h3>
+    ${(e.evidence||[]).map(ev => `<div class="ev"><b>${escapeHtml(ev.field)}</b> ${ev.verified?'<span class="chip ok">已回查</span>':'<span class="chip bad">未命中</span>'}<br>${escapeHtml(ev.quote)}</div>`).join('') || '<span style="color:var(--dim)">—</span>'}
+  </div>
+  <div class="panel-block"><h3>笔记</h3>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <button onclick="downloadNote()">导出 Markdown</button>
+    </div>
+    <div class="note-md">${mdToHtml(t.note_md || '')}</div>
+  </div>`;
+  right.innerHTML = html;
+}
+
+function downloadNote(){
+  if(!task || !task.note_md) return;
+  const blob = new Blob([task.note_md], {type:'text/markdown;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (task.title || 'note') + '.md';
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+function escapeHtml(s){
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function mdToHtml(md){
+  let h = escapeHtml(md);
+  h = h.replace(/^### (.*)$/gm, '<h3>$1</h3>')
+       .replace(/^## (.*)$/gm, '<h2>$1</h2>')
+       .replace(/^# (.*)$/gm, '<h1>$1</h1>')
+       .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+       .replace(/^- (.*)$/gm, '<li>$1</li>')
+       // 连续的 li 合成一个 ul，否则每条都变成独立列表，行距会散开
+       .replace(/(?:<li>.*<\/li>\s*)+/g, m => '<ul>' + m.trim() + '</ul>')
+       .replace(/\n{2,}/g, '<br><br>');
+  return h;
+}
+
+/* ---------- 术语库 ---------- */
+$('#btnTerms').onclick = async () => {
+  const j = await api('/api/terms');
+  const rows = (j.terms || []).map(t => `<tr>
+      <td>${escapeHtml(t.source)}</td><td>${escapeHtml(t.target)}</td>
+      <td>${escapeHtml(t.domain||'')}</td>
+      <td>${t.origin === 'manual' ? '<span class="chip ok">人工</span>' : '<span class="chip">自动</span>'}</td>
+      <td>${escapeHtml(t.tgt_lng||'—')}</td>
+      <td><button onclick="delTerm('${escapeHtml(t.source).replace(/'/g,'&#39;')}')">删除</button></td>
+    </tr>`).join('');
+  $('#modalTitle').textContent = `术语库（${(j.terms||[]).length} 条）`;
+  $('#modalBody').innerHTML = `
+    <div class="row">
+      <input id="tSrc" placeholder="英文术语">
+      <input id="tTgt" placeholder="中文译法">
+      <input id="tDomain" placeholder="领域（可空）" style="max-width:130px">
+      <button class="primary" onclick="addTerm()">添加</button>
+      <button onclick="location.href='/api/terms/export'">导出 CSV</button>
+    </div>
+    <div style="color:var(--muted);font-size:12px;margin-bottom:10px">
+      人工术语优先级高于自动提取；译法不会被自动候选覆盖。
+    </div>
+    <table><thead><tr><th>原文</th><th>译法</th><th>领域</th><th>来源</th><th>语言</th><th></th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="6" style="color:var(--dim)">空</td></tr>'}</tbody></table>`;
+  $('#mask').classList.add('show');
+};
+
+async function addTerm(){
+  const source = $('#tSrc').value.trim(), target = $('#tTgt').value.trim();
+  if(!source || !target) return toast('原文和译法都要填');
+  const r = await api('/api/terms', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({source, target, domain:$('#tDomain').value.trim() || 'general'})});
+  if(r.error) return toast(r.error);
+  toast('已添加'); $('#btnTerms').click(); health();
+}
+async function delTerm(source){
+  if(!confirm(`删除术语「${source}」？`)) return;
+  await api('/api/terms/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({source})});
+  toast('已删除'); $('#btnTerms').click(); health();
+}
+
+/* ---------- 历史笔记 ---------- */
+$('#btnNotes').onclick = async () => {
+  const j = await api('/api/notes');
+  const rows = (j.notes||[]).map(n => `<tr>
+      <td>#${n.id}</td><td>${escapeHtml(n.title||n.paper_path)}</td>
+      <td>${((n.term_rate||1)*100).toFixed(0)}%</td>
+      <td>${escapeHtml((n.created_at||'').replace('T',' ').slice(0,16))}</td>
+      <td><button onclick="openNote(${n.id})">查看</button></td>
+    </tr>`).join('');
+  $('#modalTitle').textContent = '历史笔记';
+  $('#modalBody').innerHTML = `<table><thead><tr><th>ID</th><th>论文</th><th>一致率</th><th>时间</th><th></th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="5" style="color:var(--dim)">还没有笔记</td></tr>'}</tbody></table>
+    <div id="noteView" style="margin-top:16px"></div>`;
+  $('#mask').classList.add('show');
+};
+async function openNote(id){
+  const n = await api('/api/note/' + id);
+  $('#noteView').innerHTML = `<div class="note-md" style="border-top:1px solid var(--line);padding-top:12px">
+    ${mdToHtml(n.note_md || '')}</div>`;
+}
+
+$('#modalClose').onclick = () => $('#mask').classList.remove('show');
+$('#mask').onclick = e => { if(e.target.id === 'mask') $('#mask').classList.remove('show'); };
+
+/* ---------- 恢复上一次任务（刷新不丢结果） ---------- */
+async function restore(){
+  try{
+    const t = await api('/api/task/last');
+    if(!t || t.error || !t.sections || !t.sections.length) return;
+    task = t; renderToc(t);
+    if(t.status === 'running'){
+      setBar(t.progress || 0); renderRead(t, true);
+      clearInterval(timer); timer = setInterval(poll, 700);
+    }else if(t.status === 'done'){
+      setBar(1); renderRead(t, false); renderRight(t);
+    }
+  }catch(e){}
+}
+
+health(); restore(); setInterval(health, 15000);
+</script>
+</body>
+</html>

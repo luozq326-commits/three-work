@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .venv/
+
+# 网页界面的上传缓存：运行时产物，源 PDF 在 data/papers/ 里已有
+data/uploads/
