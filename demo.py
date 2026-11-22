@@ -66,7 +66,10 @@ def main() -> int:
         print("=" * 60)
         print("2) 翻译")
         if args.sections == "all":
-            targets = [s for s in paper.sections if s.kind not in ("references", "acknowledg")]
+            targets = [
+                s for s in paper.sections
+                if s.kind not in ("references", "acknowledg", "front")
+            ]
         else:
             wanted = {k.strip() for k in args.sections.split(",")}
             targets = [s for s in paper.sections if s.kind in wanted]

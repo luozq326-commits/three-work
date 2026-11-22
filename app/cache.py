@@ -45,7 +45,14 @@ def terms_version() -> str:
 
 
 def make_key(source: str, model: str | None = None) -> str:
-    raw = f"{model or config.MAIN_MODEL}|{config.TARGET_LNG}|{terms_version()}|{source}"
+    if model is None:
+        try:
+            from . import llm
+
+            model = llm.model_name()
+        except Exception:
+            model = config.MAIN_MODEL
+    raw = f"{model}|{config.TARGET_LNG}|{terms_version()}|{source}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 

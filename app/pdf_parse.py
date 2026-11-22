@@ -10,10 +10,13 @@
 扫描版（无文本层）返回 needs_ocr=True。
 """
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 
 import pymupdf
+
+from . import config
 
 try:  # PyMuPDF 2.0 的 markdown 转换器，可选
     import pymupdf4llm
@@ -77,6 +80,7 @@ class Section:
     text: str
     level: int = 2     # 标题层级，1=一级标题，2=二级，0=无标题（front matter）
     paras: list[dict] = field(default_factory=list)  # [{page, text}]，段落级对齐用
+    tables: list[dict] = field(default_factory=list)  # [{page, rows: [[cell...]]}]
 
     @property
     def char_count(self) -> int:
@@ -92,6 +96,9 @@ class ParsedPaper:
     raw_text: str = ""
     backend: str = "layout"
     ocr_used: bool = False
+    # 页码 → 图片路径列表（论文里的插图）；页码 → 整页快照（矢量图、图表混排靠它兜底）
+    figures: dict[int, list[str]] = field(default_factory=dict)
+    page_images: dict[int, str] = field(default_factory=dict)
 
     def section(self, kind: str) -> Section | None:
         for s in self.sections:
@@ -140,44 +147,69 @@ def _page_text(page) -> str:
 # ---------------------------------------------------------------- layout 后端
 
 
-def _md_to_lines(md: str) -> list[tuple[int, str]]:
-    """markdown → [(标题层级, 纯文本)]。
+def _md_items(md: str) -> list[tuple[str, int, object]]:
+    """markdown → [("h"|"p", 层级, 文本) | ("table", 0, [[单元格...]])]。
 
-    层级 0 表示正文。表格分隔行、图内文字块、强调标记都在这里清掉，
-    保证下游拿到的 section.text 是干净散文——evidence 引用要能精确匹配原文。
+    表格单独成 token：它要按原样渲染成表格，不能拍平成一行字再去翻译。
+    图内文字块（示意图标注）整块丢掉——那是图里的字，翻出来只会污染正文。
     """
-    lines: list[tuple[int, str]] = []
+    items: list[tuple[str, int, object]] = []
     in_picture = False
+    table_buf: list[list[str]] = []
+
+    def flush_table() -> None:
+        nonlocal table_buf
+        if len(table_buf) >= 2:
+            items.append(("table", 0, table_buf))
+        elif table_buf:
+            items.append(("p", 0, " ".join(" ".join(r) for r in table_buf)))
+        table_buf = []
+
     for raw in md.split("\n"):
         line = raw.rstrip()
         marker = _PICTURE_BLOCK.search(line)
         if marker:
+            flush_table()
             in_picture = marker.group(1) == "Start"
             continue
         if in_picture:
             continue
-        if not line.strip():
-            lines.append((0, ""))
+
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            if _MD_TABLE_RULE.match(stripped):
+                continue
+            table_buf.append([c.strip() for c in stripped.strip("|").split("|")])
             continue
-        if _MD_TABLE_RULE.match(line.strip()):
+        flush_table()
+
+        if not stripped:
+            items.append(("p", 0, ""))
             continue
 
         level = 0
-        stripped = line.lstrip()
         if stripped.startswith("#"):
             hashes = len(stripped) - len(stripped.lstrip("#"))
             level = min(hashes, 3)
             stripped = stripped[hashes:].strip()
-        elif stripped.startswith("|"):
-            # 表格单元格 | a | b | → a b，避免竖线进正文
-            stripped = " ".join(c.strip() for c in stripped.strip("|").split("|") if c.strip())
-            if not stripped:
-                continue
 
         text = _MD_EMPHASIS.sub("", stripped).strip()
         if text:
-            lines.append((level, text))
-    return lines
+            items.append(("h" if level else "p", level, text))
+    flush_table()
+    return items
+
+
+def _md_to_lines(md: str) -> list[tuple[int, str]]:
+    """markdown → [(标题层级, 纯文本)]，表格拍平成一行。用于 raw_text 与兜底切分。"""
+    out: list[tuple[int, str]] = []
+    for kind, level, payload in _md_items(md):
+        if kind == "table":
+            rows = payload
+            out.append((0, " ".join(" ".join(r) for r in rows)))
+        else:
+            out.append((level, payload))
+    return out
 
 
 def _md_pages(doc) -> list[str]:
@@ -294,7 +326,12 @@ def split_sections_md(pages_md: list[str]) -> list[Section]:
         current = new
 
     for page_no, md in enumerate(pages_md, start=1):
-        for level, text in _md_to_lines(md):
+        for kind, level, payload in _md_items(md):
+            if kind == "table":
+                # 表格只记录结构，不进正文：翻译表格会把数字和表头搅乱
+                current.tables.append({"page": page_no, "rows": payload})
+                continue
+            text = payload
             if not text:
                 flush_par()
                 if current.text and not current.text.endswith("\n"):
@@ -426,6 +463,52 @@ def _fill_paras_fallback(sections: list[Section]) -> None:
         s.paras = [{"page": s.page, "text": p} for p in chunks]
 
 
+def _attach_media(paper: ParsedPaper, doc, pdf_path: str, dpi: int = 110) -> ParsedPaper:
+    """把插图和整页快照落到 data/media/<pdf摘要>/ 下，并把路径挂到 ParsedPaper 上。
+
+    两层保险：
+      - 内嵌位图：真图片，能单独展示
+      - 整页快照：矢量图、流程图、图表混排都靠它兜底（PDF 里的图很多不是位图）
+    """
+    try:
+        with open(pdf_path, "rb") as f:
+            digest = hashlib.md5(f.read(4 * 1024 * 1024)).hexdigest()[:12]
+        base = config.DATA_DIR / "media" / digest
+        base.mkdir(parents=True, exist_ok=True)
+
+        seen_xref: set[int] = set()
+        for pno, page in enumerate(doc, start=1):
+            snap = base / f"page_{pno}.png"
+            if not snap.exists():
+                try:
+                    page.get_pixmap(dpi=dpi).save(snap)
+                except Exception:
+                    pass
+            if snap.exists():
+                paper.page_images[pno] = str(snap)
+
+            for idx, img in enumerate(page.get_images(full=True)):
+                xref = img[0]
+                if xref in seen_xref:
+                    continue
+                seen_xref.add(xref)
+                try:
+                    pix = pymupdf.Pixmap(doc, xref)
+                    if pix.width < 150 or pix.height < 120:
+                        continue  # 太小基本是 logo、图标、公式碎片
+                    if pix.n > 3:
+                        pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+                    fp = base / f"fig_p{pno}_{idx}.png"
+                    pix.save(fp)
+                    paper.figures.setdefault(pno, []).append(str(fp))
+                except Exception:
+                    continue
+    except Exception:
+        # 出图失败不该让整篇解析失败：正文还能读
+        pass
+    return paper
+
+
 def parse_pdf(path: str, backend: str = "auto", ocr: bool = True) -> ParsedPaper:
     """解析一篇 PDF。
 
@@ -452,7 +535,7 @@ def parse_pdf(path: str, backend: str = "auto", ocr: bool = True) -> ParsedPaper
                 return ParsedPaper(
                     path=path, page_count=page_count, needs_ocr=True, backend="none"
                 )
-            return ParsedPaper(
+            paper = ParsedPaper(
                 path=path,
                 page_count=page_count,
                 needs_ocr=True,
@@ -461,6 +544,7 @@ def parse_pdf(path: str, backend: str = "auto", ocr: bool = True) -> ParsedPaper
                 backend="ocr",
                 ocr_used=True,
             )
+            return _attach_media(paper, doc, path)
 
         use_layout = backend == "layout" or (backend == "auto" and _HAS_4LLM)
         if use_layout:
@@ -470,7 +554,7 @@ def parse_pdf(path: str, backend: str = "auto", ocr: bool = True) -> ParsedPaper
                 raw = "\n".join(
                     "\n".join(t for _, t in _md_to_lines(md)) for md in pages_md
                 )
-                return ParsedPaper(
+                paper = ParsedPaper(
                     path=path,
                     page_count=page_count,
                     needs_ocr=False,
@@ -478,6 +562,7 @@ def parse_pdf(path: str, backend: str = "auto", ocr: bool = True) -> ParsedPaper
                     raw_text=raw,
                     backend="layout",
                 )
+                return _attach_media(paper, doc, path)
             except Exception:
                 # 版面模型缺 ONNX 运行时等情况，回落到 blocks，不让整条链路挂掉
                 if backend == "layout":
@@ -485,7 +570,7 @@ def parse_pdf(path: str, backend: str = "auto", ocr: bool = True) -> ParsedPaper
         pages = [_page_text(p) for p in doc]
         blocks_sections = split_sections(pages)
         _fill_paras_fallback(blocks_sections)
-        return ParsedPaper(
+        paper = ParsedPaper(
             path=path,
             page_count=page_count,
             needs_ocr=False,
@@ -493,6 +578,7 @@ def parse_pdf(path: str, backend: str = "auto", ocr: bool = True) -> ParsedPaper
             raw_text="\n".join(pages),
             backend="blocks",
         )
+        return _attach_media(paper, doc, path)
     finally:
         doc.close()
 

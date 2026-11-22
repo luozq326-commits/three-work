@@ -40,8 +40,21 @@
   .dot.on{background:var(--ok); box-shadow:0 0 0 3px rgba(63,185,80,.15)}
   .dot.off{background:var(--bad)}
   header .spacer{flex:1}
-  .range{display:flex; gap:6px; align-items:center; font-size:12.5px; color:var(--muted)}
-  .range select{padding:5px 8px}
+  /* 自定义下拉：原生 select 在某些缩放/多屏环境下弹层会跑到左上角，索性自己画 */
+  .dd{position:relative}
+  .dd-btn{background:var(--panel-2); border:1px solid var(--line); color:var(--muted);
+    padding:6px 11px; border-radius:7px; font-size:12.5px}
+  .dd-btn b{color:var(--text); font-weight:600}
+  .dd-menu{position:absolute; right:0; top:calc(100% + 6px); min-width:210px; display:none;
+    background:#1b2029; border:1px solid var(--line); border-radius:9px; padding:5px;
+    box-shadow:0 14px 34px rgba(0,0,0,.45); z-index:60}
+  .dd.open .dd-menu{display:block}
+  .dd-menu > div{padding:8px 10px; border-radius:6px; font-size:13px; cursor:pointer;
+    color:var(--text); display:flex; align-items:center; gap:8px}
+  .dd-menu > div:hover{background:#232a36}
+  .dd-menu > div.sel{background:#1f2a3d; color:var(--accent)}
+  .dd-menu .hint{color:var(--dim); font-size:11.5px; padding:2px 10px 6px; cursor:default}
+  .dd-menu .hint:hover{background:transparent}
 
   /* 进度条 */
   #bar{height:2px; background:var(--line); flex:none; overflow:hidden}
@@ -85,6 +98,23 @@
   .src{color:#a8b0c0; font-size:13px; font-family:ui-serif,Georgia,serif; line-height:1.7}
   .dst{color:var(--text); font-size:14px; line-height:1.85; white-space:pre-wrap}
   .cached{font-size:10px; color:var(--ok); margin-left:6px}
+  /* 表格与插图：原来这些内容被直接丢掉了 */
+  .tblwrap{overflow-x:auto; padding:8px 0 4px}
+  .tbl{border-collapse:collapse; font-size:12.5px; min-width:100%}
+  .tbl th,.tbl td{border:1px solid var(--line); padding:5px 9px; text-align:left; white-space:nowrap}
+  .tbl th{background:#20262f; color:var(--muted); font-weight:500}
+  .figs{display:flex; flex-wrap:wrap; gap:10px; padding:10px 0 2px}
+  .figs figure{margin:0; flex:1 1 260px; max-width:340px; background:#11151b;
+    border:1px solid var(--line); border-radius:8px; padding:7px}
+  .figs img{width:100%; border-radius:4px; display:block; cursor:zoom-in; background:#fff}
+  .figs figcaption{font-size:11px; color:var(--dim); padding-top:5px}
+  details.pages{margin-top:8px}
+  details.pages summary{cursor:pointer; color:var(--muted); font-size:12px; padding:5px 0}
+  details.pages img{width:100%; border:1px solid var(--line); border-radius:6px; margin-top:8px; background:#fff}
+  .zoom{position:fixed; inset:0; background:rgba(0,0,0,.85); display:none; align-items:center;
+    justify-content:center; z-index:80; padding:30px}
+  .zoom.show{display:flex}
+  .zoom img{max-width:96vw; max-height:92vh; background:#fff; border-radius:6px}
   .empty{padding:60px 34px; color:var(--muted); text-align:center; line-height:2}
   .empty kbd{background:var(--panel-2); border:1px solid var(--line); border-radius:5px;
     padding:1px 6px; font-size:12px}
@@ -147,13 +177,17 @@
   <div class="logo">Paper<span>Reader</span></div>
   <div class="status"><i class="dot" id="dot"></i><span id="modelTxt">检查模型…</span></div>
   <div class="spacer"></div>
-  <div class="range">
-    翻译范围
-    <select id="range">
-      <option value="core">摘要 + 方法 + 实验</option>
-      <option value="all">全文（较慢）</option>
-      <option value="abstract">仅摘要（最快）</option>
-    </select>
+  <div class="dd" id="ddRange">
+    <button class="dd-btn" onclick="toggleDD('ddRange')">翻译范围：<b id="rangeLabel">全文</b> ▾</button>
+    <div class="dd-menu">
+      <div data-v="all" onclick="pickRange('all')">全文（除参考文献）</div>
+      <div data-v="core" onclick="pickRange('core')">摘要 + 方法 + 实验</div>
+      <div data-v="abstract" onclick="pickRange('abstract')">仅摘要（最快）</div>
+    </div>
+  </div>
+  <div class="dd" id="ddModel">
+    <button class="dd-btn" onclick="toggleDD('ddModel')">模型：<b id="modelLabel">本机</b> ▾</button>
+    <div class="dd-menu" id="modelMenu"></div>
   </div>
   <button id="btnSearch" class="ghost">检索</button>
   <button id="btnPhone" class="ghost">手机拍照</button>
@@ -198,6 +232,8 @@
 
 <script>
 const $ = s => document.querySelector(s);
+// 渲染异常不能静默：出错时把原因写进页面标题，便于无头浏览器排查
+window.onerror = (msg, src, line, col) => { document.title = 'ERR: ' + msg + ' @' + line + ':' + col; };
 const el = (tag, cls, txt) => { const n = document.createElement(tag);
   if (cls) n.className = cls; if (txt !== undefined) n.textContent = txt; return n; };
 const KIND_CN = {abstract:'摘要',introduction:'引言',related:'相关工作',method:'方法',
@@ -205,6 +241,86 @@ const KIND_CN = {abstract:'摘要',introduction:'引言',related:'相关工作',
   references:'参考文献',appendix:'附录',other:'其他',front:'题名页'};
 
 let task = null, timer = null, currentFile = null;
+let RANGE = 'all';
+let SETTINGS = null;
+const RANGE_LABEL = {all:'全文', core:'摘要+方法+实验', abstract:'仅摘要'};
+
+function toggleDD(id){
+  const d = document.getElementById(id);
+  document.querySelectorAll('.dd').forEach(x => { if(x !== d) x.classList.remove('open'); });
+  d.classList.toggle('open');
+}
+function closeDD(){ document.querySelectorAll('.dd').forEach(x => x.classList.remove('open')); }
+document.addEventListener('click', e => { if(!e.target.closest('.dd')) closeDD(); });
+
+function pickRange(v){
+  RANGE = v;
+  $('#rangeLabel').textContent = RANGE_LABEL[v] || v;
+  closeDD();
+}
+
+function kindsFor(range){
+  if(range === 'abstract') return ['abstract'];
+  // "*" 交给服务端解释为"除参考文献/致谢外的全部章节"，包括认不出名字的 other
+  if(range === 'all') return ['*'];
+  return ['abstract','introduction','related','method','experiment','other','conclusion'];
+}
+
+/* ---------- 模型提供方 ---------- */
+async function loadSettings(){
+  try{
+    SETTINGS = await api('/api/settings');
+    const p = SETTINGS.providers[SETTINGS.active] || {};
+    const warn = (p.backend !== 'ollama' && !p.has_key) ? '（缺密钥）' : '';
+    $('#modelLabel').textContent = (p.label || '本机') + warn;
+    $('#modelMenu').innerHTML = Object.entries(SETTINGS.providers).map(([k,v]) => `
+      <div class="${k===SETTINGS.active?'sel':''}" onclick="switchProvider('${k}')">
+        <span>${escapeHtml(v.label)}${k===SETTINGS.active?' ✓':''}</span>
+        <span style="margin-left:auto;font-size:11px;color:var(--dim)">
+          ${v.backend==='ollama' ? '本地' : (v.has_key ? '已配密钥' : '未配密钥')}</span>
+      </div>`).join('')
+      + `<div class="hint" onclick="openProviderModal('${SETTINGS.active}')"
+            style="cursor:pointer;color:var(--accent)">配置当前提供方（密钥 / 模型名）…</div>`;
+  }catch(e){}
+}
+
+async function switchProvider(name){
+  SETTINGS = await api('/api/settings', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({active:name})});
+  closeDD(); await loadSettings(); health();
+  const p = SETTINGS.providers[name] || {};
+  if(p.backend !== 'ollama' && !p.has_key) openProviderModal(name);
+}
+
+function openProviderModal(name){
+  const p = (SETTINGS && SETTINGS.providers[name]) || {};
+  $('#modalTitle').textContent = '配置模型提供方：' + (p.label || name);
+  $('#modalBody').innerHTML = `
+    <div class="row"><input id="pBase" placeholder="接口地址（OpenAI 兼容）" value="${escapeHtml(p.base_url||'')}"></div>
+    <div class="row"><input id="pModel" placeholder="模型名，如 deepseek-chat / doubao-seed-1-6" value="${escapeHtml(p.model||'')}"></div>
+    <div class="row"><input id="pKey" type="password" placeholder="API Key（只存本机 data/settings.json）" value=""></div>
+    <div style="color:var(--muted);font-size:12.5px;line-height:1.8;margin:8px 0 12px">
+      云端模式下论文正文会发送到对应服务商，本地推理的隐私保证不再成立。<br>
+      演示建议：本机模型讲"数据不出机"，云端模型只用于对比效果。
+    </div>
+    <button class="primary" onclick="saveProvider('${name}')">保存并测试</button>
+    <span id="pTest" style="margin-left:12px;color:var(--muted);font-size:12.5px"></span>`;
+  $('#mask').classList.add('show');
+}
+
+async function saveProvider(name){
+  $('#pTest').textContent = '保存中…';
+  const body = {name, base_url: $('#pBase').value.trim(), model: $('#pModel').value.trim()};
+  const key = $('#pKey').value.trim();
+  if(key) body.api_key = key;
+  await api('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body)});
+  await loadSettings();
+  const ok = await api('/api/health');
+  $('#pTest').textContent = ok.ok ? '连接正常' : '连接失败，检查地址/密钥/模型名';
+  $('#pTest').style.color = ok.ok ? 'var(--ok)' : 'var(--bad)';
+  health();
+}
 
 function toast(msg, ms=2200){
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
@@ -224,9 +340,10 @@ async function health(){
     const h = await api('/api/health');
     const dot = $('#dot');
     dot.className = 'dot ' + (h.ok ? 'on' : 'off');
+    const who = h.label ? `${h.label} · ${h.model}` : h.model;
     $('#modelTxt').textContent = h.ok
-      ? `${h.model} · 术语 ${h.terms} 条`
-      : `模型未启动（${h.base_url}）`;
+      ? `${who} · 术语 ${h.terms} 条`
+      : `${who} 不可用（${h.base_url}）`;
   }catch(e){
     $('#dot').className='dot off'; $('#modelTxt').textContent='服务异常';
   }
@@ -255,7 +372,7 @@ function kindsFor(range){
 }
 
 async function start(path){
-  const kinds = kindsFor($('#range').value);
+  const kinds = kindsFor(RANGE);
   const r = await api('/api/run', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({path, kinds})});
   if(r.error){ toast(r.error, 3500); return; }
@@ -277,11 +394,12 @@ async function poll(){
     $('#center').innerHTML = `<div class="empty">前面还有任务在跑，已排队…<br>
       <span style="font-size:12.5px">本地只有一块 8GB 显存，同时跑两个会互相拖慢</span></div>`;
   }else if(t.status === 'running'){
-    const label = `${t.stage}（${t.stage_index}/${t.stage_total}）`;
-    if(!$('#runningTip')){
-      $('#center').innerHTML = `<div class="empty" id="runningTip">${label}…<br>
-        <span style="font-size:12.5px">翻译按段落推进，已完成的会陆续出现</span></div>`;
-    }else{ $('#runningTip').firstChild.textContent = label + '…'; }
+    // 还没解析出章节时给个占位；有了章节就完全交给 renderRead，
+    // 两边都往 #center 写会互相覆盖，最后卡在占位上
+    if(!t.sections || !t.sections.length){
+      $('#center').innerHTML = `<div class="empty">${t.stage || '解析'}…</div>`;
+      return;
+    }
     renderRead(t, true);
   }else if(t.status === 'done'){
     clearInterval(timer); timer = null; setBar(1);
@@ -327,7 +445,8 @@ function renderRead(t, streaming){
   const center = $('#center');
   const paraDone = t.sections.reduce((n,s)=>n+(s.paras||[]).filter(p=>p.translation).length,0);
   const paraAll = t.sections.reduce((n,s)=>n+(s.paras||[]).length,0);
-  const sig = [t.sections.length, streaming?1:0, t.status, paraDone, paraAll].join('|');
+  const sig = [t.sections.length, streaming?1:0, t.status, paraDone, paraAll,
+               t.stage || '', Math.round((t.progress||0)*100)].join('|');
   if(center.dataset.sig === sig) return;
   center.dataset.sig = sig;
   const keepY = center.scrollTop;
@@ -361,11 +480,56 @@ function renderRead(t, streaming){
         <div class="src">${escapeHtml(p.source)}</div>
         ${p.translation ? `<div class="dst">${escapeHtml(p.translation)}</div>` : ''}
       </div>`).join('');
+
+    const tables = (s.tables || []).map(t => `
+      <div class="tblwrap">
+        <table class="tbl">${(t.rows || []).map((r, ri) => `<tr>${
+          (r || []).map(c => ri === 0 ? `<th>${escapeHtml(c)}</th>` : `<td>${escapeHtml(c)}</td>`).join('')
+        }</tr>`).join('')}</table>
+        <div class="pno">第 ${t.page} 页 · 表格（原文结构，未翻译）</div>
+      </div>`).join('');
+
+    const figs = (s.figures || []).length ? `<div class="figs">${s.figures.map(f => `
+      <figure><img src="${f.url}" loading="lazy" onclick="zoomImg('${f.url}')">
+        <figcaption>第 ${f.page} 页 · 插图（点击放大）</figcaption></figure>`).join('')}</div>` : '';
+
+    const snaps = (s.page_images || []).length ? `
+      <details class="pages"><summary>查看原文页（${s.page_images.length} 页，含矢量图表）</summary>
+        ${s.page_images.map(p => `<img src="${p.url}" loading="lazy">
+          <div class="pno">第 ${p.page} 页</div>`).join('')}
+      </details>` : '';
+
+    const extras = (tables || figs)
+      ? `<div class="pno" style="margin-top:14px;border-top:1px solid var(--line);padding-top:10px">
+           本节表格与插图（按原文页标注，未翻译）</div>${tables}${figs}`
+      : '';
+
     html += `<div class="card" id="sec-${i}">${head}<div class="card-b">${
-      body || '<div class="src" style="color:var(--dim)">（未翻译）</div>'}</div></div>`;
+      body || '<div class="src" style="color:var(--dim)">（本段未翻译）</div>'}${extras}${snaps}</div></div>`;
   });
   center.innerHTML = html;
   center.scrollTop = keepY;
+  // 支持 #sec-5 这类锚点：内容渲染完再滚，否则浏览器找不到节点
+  // 延迟一拍是必要的：插图是懒加载，加载后高度变化会把滚动位置顶走
+  if(location.hash){
+    setTimeout(() => {
+      const target = document.querySelector(location.hash);
+      if(target) target.scrollIntoView({block:'start'});
+    }, 400);
+  }
+}
+
+function zoomImg(url){
+  let box = document.getElementById('zoomBox');
+  if(!box){
+    box = document.createElement('div');
+    box.id = 'zoomBox'; box.className = 'zoom';
+    box.onclick = () => box.classList.remove('show');
+    box.innerHTML = '<img id="zoomImg">';
+    document.body.appendChild(box);
+  }
+  document.getElementById('zoomImg').src = url;
+  box.classList.add('show');
 }
 
 async function cancelTask(){
@@ -385,6 +549,16 @@ function renderRight(t){
     : '<span style="color:var(--dim)">—</span>';
 
   let html = `<div class="panel-block">
+    <h3>AI 总结</h3>
+    <div style="margin-bottom:9px">
+      <button onclick="genSummary()" id="btnSum">${t.summary ? '重新生成总结' : '生成整篇总结'}</button>
+    </div>
+    <div class="note-md" id="sumView" style="padding:0">${
+      t.summary ? mdToHtml(t.summary)
+                : '<span style="color:var(--dim);font-size:12.5px">通读全文后给出「解决什么 / 怎么做的 / 结果 / 局限 / 该不该读」，比逐字段抽取更连贯。</span>'
+    }</div>
+  </div>
+  <div class="panel-block">
     <h3>质量</h3>
     <span class="chip ${rep.hit_rate >= 0.9 ? 'ok' : 'bad'}">证据命中 ${(rep.hit_rate*100||0).toFixed(0)}%</span>
     <span class="chip">${rep.evidence_verified}/${rep.evidence_total} 条</span>
@@ -439,6 +613,18 @@ function renderRight(t){
       if(n && n.user_note && $('#annoArea')) $('#annoArea').value = n.user_note;
     }).catch(()=>{});
   }
+}
+
+async function genSummary(){
+  if(!task) return toast('先处理一篇论文');
+  const btn = $('#btnSum');
+  btn.disabled = true; btn.textContent = '总结中，约 20 秒…';
+  const r = await api('/api/summary', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({task_id: task.id})});
+  btn.disabled = false; btn.textContent = '重新生成总结';
+  if(r.error){ toast(r.error, 5000); return; }
+  task.summary = r.summary;
+  $('#sumView').innerHTML = mdToHtml(r.summary);
 }
 
 function toggleEditNote(){
@@ -684,7 +870,7 @@ async function restore(){
   }catch(e){}
 }
 
-health(); restore(); setInterval(health, 15000);
+health(); loadSettings(); restore(); setInterval(health, 15000);
 </script>
 </body>
 </html>

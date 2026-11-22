@@ -39,7 +39,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from app import cache, config, extract, llm, note, pdf_parse, search, terms, translate
+from app import cache, config, extract, llm, note, pdf_parse, search, settings, summarize, terms, translate
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(ROOT, "web", "static")
@@ -71,6 +71,32 @@ def _lan_ip() -> str:
 # ---------------------------------------------------------------- 任务执行
 
 
+def _media_url(path: str) -> str:
+    """data/media/... → /media/...，给前端用。"""
+    try:
+        rel = os.path.relpath(path, os.path.join(config.DATA_DIR, "media"))
+        return "/media/" + rel.replace("\\", "/")
+    except Exception:
+        return ""
+
+
+def _section_media(paper, idx: int) -> dict:
+    """把某章节覆盖的页里的插图、整页快照整理成前端能直接用的 URL 列表。"""
+    sec = paper.sections[idx]
+    nxt = paper.sections[idx + 1].page if idx + 1 < len(paper.sections) else paper.page_count + 1
+    # 同一页上常有多个章节，end 至少要比 start 大 1，否则这一节拿不到任何原页
+    start = sec.page
+    end = max(start + 1, min(nxt, paper.page_count + 1))
+
+    figs, snaps = [], []
+    for pno in range(start, end):
+        for f in paper.figures.get(pno, []):
+            figs.append({"page": pno, "url": _media_url(f)})
+        if pno in paper.page_images:
+            snaps.append({"page": pno, "url": _media_url(paper.page_images[pno])})
+    return {"figures": figs, "page_images": snaps}
+
+
 def _new_task(pdf_path: str, kinds: list[str]) -> str:
     global LAST_TASK_ID
     tid = uuid.uuid4().hex[:12]
@@ -90,6 +116,7 @@ def _new_task(pdf_path: str, kinds: list[str]) -> str:
             "progress": 0.0,
             "sections": [],
             "elements": None,
+            "summary": "",
             "note_md": "",
             "note_id": None,
             "timings": {},
@@ -128,22 +155,37 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "") -> Non
             _update(tid, status="error", error="扫描件识别失败，可能是图片质量太低")
             return
 
-        sections = [
-            {
-                "kind": s.kind,
-                "title": s.title,
-                "page": s.page,
-                "chars": s.char_count,
-                "text": s.text.strip(),
-                "paras": [],
-                "term_rate": None,
-                "violations": 0,
-                "chunks": 0,
-                "seconds": 0.0,
-                "cache_hits": 0,
-            }
-            for s in paper.sections
-        ]
+        sections = []
+        for i, s in enumerate(paper.sections):
+            media = _section_media(paper, i)
+            sections.append(
+                {
+                    "kind": s.kind,
+                    "title": s.title,
+                    "page": s.page,
+                    "chars": s.char_count,
+                    "text": s.text.strip(),
+                    # 先把原文段落填进去：没翻译的章节也该能读英文，而不是一片空白
+                    "paras": [
+                        {
+                            "page": p.get("page", s.page),
+                            "source": p.get("text", ""),
+                            "translation": "",
+                            "aligned": True,
+                            "cached": False,
+                        }
+                        for p in (s.paras or [{"page": s.page, "text": s.text}])
+                    ],
+                    "tables": s.tables,
+                    "figures": media["figures"],
+                    "page_images": media["page_images"],
+                    "term_rate": None,
+                    "violations": 0,
+                    "chunks": 0,
+                    "seconds": 0.0,
+                    "cache_hits": 0,
+                }
+            )
         _update(
             tid,
             sections=sections,
@@ -158,7 +200,13 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "") -> Non
         )
 
         # 2) 翻译：按章节推进，章节内按段落推进，前端能边翻边读
-        targets = [i for i, s in enumerate(sections) if s["kind"] in kinds]
+        if "*" in kinds:
+            # 全文 = 除参考文献/致谢/题名页外的所有章节，包括版面模型认不出名字的 other
+            # 题名页是标题、作者、邮箱，翻了只会出现"Kaiming He → Kaiming He"这种噪音
+            skip = ("references", "acknowledg", "front")
+            targets = [i for i, s in enumerate(sections) if s["kind"] not in skip]
+        else:
+            targets = [i for i, s in enumerate(sections) if s["kind"] in kinds]
         if not targets:
             targets = [i for i, s in enumerate(sections) if s["kind"] in ("abstract",)]
         t0 = time.perf_counter()
@@ -326,13 +374,28 @@ class Handler(BaseHTTPRequestHandler):
             top_k = int((q.get("k") or ["5"])[0])
             self._json(search.search(query, top_k=top_k))
             return
+        if path.startswith("/media/"):
+            rel = path[len("/media/"):]
+            base = os.path.join(config.DATA_DIR, "media")
+            candidate = os.path.normpath(os.path.join(base, rel))
+            if candidate.startswith(base) and os.path.isfile(candidate):
+                self._file(candidate)
+                return
+            self._json({"error": "not found"}, 404)
+            return
+        if path == "/api/settings":
+            self._json(settings.public_view())
+            return
         if path == "/api/health":
+            cfg = settings.current()
             self._json(
                 {
                     "ok": llm.health(),
-                    "model": config.MAIN_MODEL,
-                    "backend": config.BACKEND,
-                    "base_url": config.BASE_URL,
+                    "model": cfg.get("model"),
+                    "backend": cfg.get("backend"),
+                    "provider": cfg.get("name"),
+                    "label": cfg.get("label"),
+                    "base_url": cfg.get("base_url"),
                     "terms": len(terms.all_terms()),
                     "target_lng": config.TARGET_LNG,
                 }
@@ -381,6 +444,38 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         path = u.path
         q = parse_qs(u.query)
+
+        if path == "/api/settings":
+            data = self._body()
+            if data.get("name"):
+                settings.update(data["name"], **data)
+            if data.get("active"):
+                settings.set_active(data["active"])
+            self._json(settings.public_view())
+            return
+
+        if path == "/api/summary":
+            data = self._body()
+            tid = data.get("task_id") or LAST_TASK_ID or ""
+            with TASK_LOCK:
+                t = json.loads(json.dumps(TASKS.get(tid) or {}))
+            if not t:
+                self._json({"error": "任务不存在"}, 404)
+                return
+            from types import SimpleNamespace
+
+            secs = [
+                SimpleNamespace(kind=s.get("kind", ""), text=s.get("text") or "")
+                for s in t.get("sections", [])
+            ]
+            try:
+                md = summarize.summarize(secs, t.get("title", ""))
+            except Exception as exc:
+                self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+                return
+            _update(tid, summary=md)
+            self._json({"summary": md})
+            return
 
         # 取消任务：worker 在章节之间检查这个标记
         m = re.match(r"^/api/task/([0-9a-zA-Z]+)/cancel$", path)
@@ -454,7 +549,7 @@ class Handler(BaseHTTPRequestHandler):
             if not os.path.isfile(abs_path) or not abs_path.lower().endswith(".pdf"):
                 self._json({"error": "PDF 路径无效"}, 400)
                 return
-            kinds = data.get("kinds") or ["abstract", "introduction", "method", "experiment", "conclusion"]
+            kinds = data.get("kinds") or ["*"]
             tid = _new_task(abs_path, kinds)
             title = TASKS[tid]["title"]
             threading.Thread(
