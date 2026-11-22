@@ -855,6 +855,7 @@ $('#btnPhone').onclick = async () => {
            <div style="font-size:13px;color:var(--muted);margin-bottom:6px">手机扫这个码</div>
            <div style="font-size:15px;font-weight:600">${escapeHtml(url)}</div>
            ${fwHtml(j)}
+           ${wifiHtml(j)}
            <div style="color:var(--muted);font-size:12.5px;margin-top:10px">
              手机和电脑要在同一个 WiFi 下。<br>
              手机上拍照 → 识别英文 → 点翻译，全部在这台电脑上算，图片不出局域网。<br>
@@ -864,6 +865,24 @@ $('#btnPhone').onclick = async () => {
        </div>`;
   $('#mask').classList.add('show');
 };
+
+// 校园网/公共 WiFi 常开客户端隔离：防火墙放行了，手机照样 ERR_ADDRESS_UNREACHABLE
+function wifiHtml(j){
+  const w = j.wifi || {};
+  if(!w.ssid) return '';
+  const risky = /sdu|edu|校园|guest|访客|public|free|univ|student/i.test(w.ssid);
+  if(!risky) {
+    return `<div style="margin-top:6px;font-size:12.5px;color:var(--muted)">
+      当前 WiFi：<b style="color:var(--text)">${escapeHtml(w.ssid)}</b>${w.signal ? '（' + escapeHtml(w.signal) + '）' : ''}</div>`;
+  }
+  return `<div style="margin-top:8px;padding:9px 11px;border:1px solid var(--warn);border-radius:7px;
+      font-size:12.5px;line-height:1.85;color:var(--warn)">
+      当前 WiFi：<b>${escapeHtml(w.ssid)}</b>${w.signal ? '（' + escapeHtml(w.signal) + '）' : ''}<br>
+      这类网络（校园网/公共 WiFi）通常开了<b>客户端隔离</b>，设备之间互相不可见，
+      手机即使连同一个 WiFi 也会报 ERR_ADDRESS_UNREACHABLE。<br>
+      <b>最稳的办法</b>：手机开热点 → 电脑连这个热点 → 关掉这个弹窗再点「手机拍照」重新扫码。
+    </div>`;
+}
 
 // 手机连不上九成是防火墙：WLAN 常被识别为「公用网络」，默认拦入站
 function fwHtml(j){

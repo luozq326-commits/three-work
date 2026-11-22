@@ -80,6 +80,24 @@ def _decode_cmd(data: bytes) -> str:
     return data.decode("utf-8", "ignore")
 
 
+def _wifi_info() -> dict:
+    """当前连的 WiFi 名称。校园网/公共 WiFi 常开客户端隔离，手机连不上本机。"""
+    info = {"ssid": "", "signal": ""}
+    try:
+        out = _decode_cmd(
+            subprocess.run(["netsh", "wlan", "show", "interfaces"], capture_output=True).stdout
+        )
+        for line in out.splitlines():
+            s = line.strip()
+            if s.startswith("SSID") and "BSSID" not in s:
+                info["ssid"] = s.split(":", 1)[-1].strip()
+            elif s.startswith("信号") or s.lower().startswith("signal"):
+                info["signal"] = s.split(":", 1)[-1].strip()
+    except Exception:
+        pass
+    return info
+
+
 def _firewall_state(port: int) -> dict:
     """查 Windows 防火墙是否放行了这个端口。
 
@@ -490,6 +508,7 @@ class Handler(BaseHTTPRequestHandler):
                     "url": f"http://{ip}:{port}/mobile",
                     "ip": ip,
                     "port": port,
+                    "wifi": _wifi_info(),
                     "firewall": fw,
                     # 给用户一键复制：加规则需要管理员权限，程序自己提不了权
                     "fix_cmd": (
