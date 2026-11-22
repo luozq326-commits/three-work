@@ -28,13 +28,24 @@ CREATE INDEX IF NOT EXISTS idx_note_path ON note(paper_path);
 """
 
 SECTIONS = (
-    "一句话总结",
+    "核心结论",
     "研究问题",
     "方法要点",
     "关键数据",
     "创新点",
     "局限与我的疑问",
     "可借鉴点",
+)
+
+# 每节的写作要点：逐节生成时一次只喂一条，避免模型把七节混成一锅
+NOTE_SECTIONS = (
+    ("核心结论", "用 300 字说清这篇论文最后立住了什么结论，靠什么证据立住的，成立的前提是什么。"),
+    ("研究问题", "用 300 字讲清它要解决的具体问题、此前做法的卡点，以及这个问题为什么重要。"),
+    ("方法要点", "用 300 字按步骤讲方法怎么运作：输入是什么、每一步做什么、关键设计为什么必须这样。"),
+    ("关键数据", "用 300 字列具体数字：数据集、指标、提升幅度、对比对象。数字必须来自给定材料。"),
+    ("创新点", "用 300 字逐条评估作者宣称的创新，指出哪些是真创新、哪些是组合或包装，并给依据。"),
+    ("局限与我的疑问", "用 300 字写局限：作者承认的、你看出来的、以及读完后你自己想问作者的问题。"),
+    ("可借鉴点", "用 300 字写这篇论文里哪些做法能搬到自己的研究或工程里，搬的时候要注意什么。"),
 )
 
 
@@ -94,8 +105,14 @@ def _evidence_appendix(elements: Elements, limit: int = 8) -> str:
     return "\n".join(lines)
 
 
-def build_note(elements: Elements, title: str = "", use_model: bool = True) -> str:
-    """把抽取结果整理成中文笔记。模型失败时退回模板笔记。"""
+def build_note(
+    elements: Elements, title: str = "", use_model: bool = True, context: str = ""
+) -> str:
+    """把抽取结果整理成中文笔记。模型失败时退回模板笔记。
+
+    context 是论文正文节选：只给结构化字段的话，模型写不出 300 字/节，
+    只能反复复述同样几句话。宁可多喂上下文。
+    """
     if not use_model:
         return _fallback_note(elements, title) + _evidence_appendix(elements)
 
@@ -104,28 +121,32 @@ def build_note(elements: Elements, title: str = "", use_model: bool = True) -> s
         ensure_ascii=False,
         indent=1,
     )
+    head = (
+        f"论文标题：{title or '未知'}\n\n结构化要素：\n{payload}\n\n"
+        + (f"论文正文节选（写细节时以这里为准）：\n{context}" if context else "")
+    )
+
+    # 逐节生成：一次让模型写七节，实测每节只有 80~130 字，怎么要求都写不够。
+    # 每节单独一次调用，300 字才稳。
+    parts: list[str] = []
     try:
-        body = llm.chat(
-            [
-                {"role": "system", "content": NOTE_SYSTEM},
-                {
-                    "role": "user",
-                    "content": f"论文标题：{title or '未知'}\n\n结构化要素：\n{payload}",
-                },
-            ]
-        )
+        for name, brief in NOTE_SECTIONS:
+            user = (
+                f"{head}\n\n---\n现在只写「{name}」这一节。\n本节要写：{brief}\n"
+                f"篇幅不少于 300 字，只输出这一节，用「## {name}」开头。"
+            )
+            body = llm.chat(
+                [{"role": "system", "content": NOTE_SYSTEM}, {"role": "user", "content": user}],
+                timeout=200,
+                max_tokens=900,
+            ).strip()
+            if not body.startswith("##"):
+                body = f"## {name}\n\n{body}"
+            parts.append(body)
     except Exception:
         return _fallback_note(elements, title) + _evidence_appendix(elements)
 
-    if not body.strip().startswith("#"):
-        body = f"# {title or '未命名论文'}\n\n{body.strip()}"
-
-    # 模型爱用 ### 当章节标题，统一压回 ##，保证七段结构在渲染时同级
-    for name in SECTIONS:
-        stem = name.split("与")[0].strip()
-        body = re.sub(
-            rf"^#{{1,6}}\s*({re.escape(stem)}[^\n]*)$", r"## \1", body, flags=re.M
-        )
+    body = f"# {title or '未命名论文'}\n\n" + "\n\n".join(parts)
 
     # 缺哪一段就补哪一段，保证七段结构完整
     missing = [s for s in SECTIONS if not _has_section(body, s)]

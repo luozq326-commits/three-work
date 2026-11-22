@@ -25,6 +25,8 @@ def _cfg() -> dict:
         "model": p.get("model") or config.MAIN_MODEL,
         "api_key": p.get("api_key") or "",
         "name": p.get("name") or "local",
+        # 别漏字段：漏了 disable_thinking，豆包就会一直开着深度思考烧 token
+        "disable_thinking": bool(p.get("disable_thinking")),
     }
 
 
@@ -93,6 +95,7 @@ def chat(
     num_ctx: int | None = None,
     timeout: int | None = None,
     return_meta: bool = False,
+    max_tokens: int | None = None,
 ):
     """统一对话接口。
 
@@ -108,11 +111,15 @@ def chat(
     started = time.perf_counter()
 
     if c["backend"] == "ollama":
+        options = {"temperature": temperature, "num_ctx": num_ctx}
+        # 不设上限时模型偶尔会一路写下去，单次调用能拖到几分钟
+        if max_tokens:
+            options["num_predict"] = max_tokens
         payload = {
             "model": model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": temperature, "num_ctx": num_ctx},
+            "options": options,
         }
         data = _post(f"{c['base_url']}/api/chat", payload, timeout, c["api_key"])
         text = data.get("message", {}).get("content", "")
@@ -132,6 +139,11 @@ def chat(
             "temperature": temperature,
             "stream": False,
         }
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        # 豆包 2.x 的「深度思考」对翻译这类任务纯属浪费：两句话能产 5000 思考 token
+        if c.get("disable_thinking"):
+            payload["thinking"] = {"type": "disabled"}
         data = _post(f"{c['base_url']}/chat/completions", payload, timeout, c["api_key"])
         choices = data.get("choices") or [{}]
         text = (choices[0].get("message") or {}).get("content", "") or ""

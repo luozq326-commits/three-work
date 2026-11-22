@@ -103,6 +103,56 @@ def _section_media(paper, idx: int) -> dict:
     return {"figures": figs, "page_images": snaps}
 
 
+def _translate_remaining(tid: str) -> None:
+    """补译当前任务里还没翻译的章节。
+
+    为什么单独做：解析和翻译分开之后，用户可以先用"仅摘要"快速看，
+    觉得值得再补译，不必从头重跑（译文有缓存，补译只花没翻过的那部分）。
+    """
+    if not _RUN_SLOTS.acquire(blocking=False):
+        _update(tid, status="queued", stage="排队中")
+        _RUN_SLOTS.acquire()
+    try:
+        with TASK_LOCK:
+            t = TASKS.get(tid)
+            if not t:
+                return
+            snapshot = [
+                (i, s["kind"], list(s.get("paras") or []))
+                for i, s in enumerate(t["sections"])
+            ]
+        skip = ("references", "acknowledg", "front")
+        todo = [
+            i
+            for i, kind, paras in snapshot
+            if kind not in skip and not any(p.get("translation") for p in paras)
+        ]
+        if not todo:
+            _update(tid, status="done", stage="完成", progress=1.0)
+            return
+
+        _update(tid, status="running", stage="补译", stage_index=2, progress=0.0)
+        for n, idx in enumerate(todo, start=1):
+            with TASK_LOCK:
+                paras = list((TASKS[tid]["sections"][idx].get("paras") or []))
+            src = [{"page": p.get("page"), "text": p.get("source")} for p in paras]
+            if not src:
+                continue
+            try:
+                r = translate.translate_paragraphs(src)
+                with TASK_LOCK:
+                    TASKS[tid]["sections"][idx]["paras"] = r["paras"]
+                    TASKS[tid]["sections"][idx]["term_rate"] = r["term_rate"]
+                    TASKS[tid]["sections"][idx]["violations"] = r["violations"]
+            except Exception as exc:
+                with TASK_LOCK:
+                    TASKS[tid]["sections"][idx]["error"] = f"{type(exc).__name__}: {exc}"
+            _update(tid, progress=round(n / len(todo), 3))
+        _update(tid, status="done", stage="完成", progress=1.0)
+    finally:
+        _RUN_SLOTS.release()
+
+
 def _new_task(pdf_path: str, kinds: list[str]) -> str:
     global LAST_TASK_ID
     tid = uuid.uuid4().hex[:12]
@@ -274,7 +324,11 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "", backen
         # 4) 笔记
         t0 = time.perf_counter()
         rates = [s["term_rate"] for s in sections if s["term_rate"] is not None]
-        md = note.build_note(el, title or os.path.basename(pdf_path))
+        md = note.build_note(
+            el,
+            title or os.path.basename(pdf_path),
+            context=summarize.build_context(paper.sections, 5000),
+        )
         nid = note.save(
             pdf_path,
             title or os.path.basename(pdf_path),
@@ -466,6 +520,18 @@ class Handler(BaseHTTPRequestHandler):
             if data.get("active"):
                 settings.set_active(data["active"])
             self._json(settings.public_view())
+            return
+
+        if path == "/api/retranslate":
+            data = self._body()
+            tid = data.get("task_id") or LAST_TASK_ID or ""
+            with TASK_LOCK:
+                exists = tid in TASKS
+            if not exists:
+                self._json({"error": "任务不存在"}, 404)
+                return
+            threading.Thread(target=_translate_remaining, args=(tid,), daemon=True).start()
+            self._json({"ok": True, "task_id": tid})
             return
 
         if path == "/api/summary":

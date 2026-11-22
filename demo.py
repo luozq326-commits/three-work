@@ -16,7 +16,7 @@ import os
 import sys
 import time
 
-from app import config, extract, llm, note, pdf_parse, terms, translate
+from app import config, extract, llm, note, pdf_parse, terms, translate, summarize
 
 
 def _fmt(sec: float) -> str:
@@ -160,7 +160,7 @@ def main() -> int:
         print("=" * 60)
         print("5) 笔记")
         t0 = time.perf_counter()
-        md = note.build_note(el, title)
+        md = note.build_note(el, title, context=summarize.build_context(paper.sections, 5000))
         timings["笔记"] = time.perf_counter() - t0
         rate = (
             sum(r["term_rate"] for _, r in translated) / len(translated)

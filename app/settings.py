@@ -32,8 +32,11 @@ DEFAULTS = {
             "label": "豆包（火山方舟）",
             "backend": "openai",
             "base_url": "https://ark.cn-beijing.volces.com/api/v3",
-            "model": "doubao-seed-1-6-250615",
+            "model": "doubao-seed-2-1-lite-260915",
             "api_key": "",
+            # 豆包 2.x 默认开「深度思考」，翻译两句话能吐出 5000 token 的思考过程，
+            # 又慢又贵，所以默认关掉；需要推理的场景再单独打开
+            "disable_thinking": True,
         },
         "custom": {
             "label": "自定义 OpenAI 兼容",
@@ -84,6 +87,8 @@ def update(name: str, **kw) -> dict:
     for k in ("label", "backend", "base_url", "model", "api_key"):
         if kw.get(k) is not None:
             data["providers"][name][k] = str(kw[k]).strip()
+    if kw.get("disable_thinking") is not None:
+        data["providers"][name]["disable_thinking"] = bool(kw["disable_thinking"])
     save(data)
     return data["providers"][name]
 

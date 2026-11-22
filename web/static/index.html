@@ -460,7 +460,7 @@ function renderToc(t){
     it.dataset.idx = i;
     it.append(el('span','k', KIND_CN[s.kind] || s.kind));
     it.append(el('span','t', s.title));
-    it.append(el('span','n', done ? '已译' : s.chars + '字'));
+    it.append(el('span','n', done ? '已译' : `未译 · ${s.chars}字`));
     it.onclick = () => {
       document.querySelectorAll('.toc-item').forEach(x=>x.classList.remove('active'));
       it.classList.add('active');
@@ -490,6 +490,15 @@ function renderRead(t, streaming){
     html += `<div class="warnbox" style="display:flex;align-items:center;gap:12px">
       <span style="flex:1">正在翻译（${t.stage||''}），已完成的段落可以先读。全文约 4~6 分钟。</span>
       <button onclick="cancelTask()" style="padding:5px 12px">停止</button></div>`;
+  }else{
+    // 只翻了部分章节时给出明确入口，不要让人以为"永远翻不完"
+    const bodySecs = t.sections.filter(s => !['references','acknowledg','front'].includes(s.kind));
+    const left = bodySecs.filter(s => !(s.paras || []).some(p => p.translation)).length;
+    if(left > 0){
+      html += `<div class="warnbox" style="display:flex;align-items:center;gap:12px">
+        <span style="flex:1">还有 <b>${left}</b> 节正文没有翻译（当前只翻了部分章节）。</span>
+        <button onclick="retranslate()" style="padding:5px 12px">补译剩余 ${left} 节</button></div>`;
+    }
   }
   t.sections.forEach((s, i) => {
     const paras = s.paras || [];
@@ -618,6 +627,16 @@ async function cancelTask(){
   if(!task) return;
   await api('/api/task/' + task.id + '/cancel', {method:'POST'});
   toast('已请求停止，当前段落译完就停');
+}
+
+async function retranslate(){
+  if(!task) return;
+  const r = await api('/api/retranslate', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({task_id: task.id})});
+  if(r.error) return toast(r.error);
+  toast('开始补译剩余章节，译文有缓存，只花没翻过的部分');
+  if(!timer) timer = setInterval(poll, 1200);
+  poll();
 }
 
 /* ---------- 渲染：右栏要素 ---------- */
