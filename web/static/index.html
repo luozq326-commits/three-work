@@ -185,6 +185,13 @@
       <div data-v="abstract" onclick="pickRange('abstract')">仅摘要（最快）</div>
     </div>
   </div>
+  <div class="dd" id="ddParse">
+    <button class="dd-btn" onclick="toggleDD('ddParse')">解析：<b id="parseLabel">快速</b> ▾</button>
+    <div class="dd-menu">
+      <div data-v="auto" onclick="pickParse('auto')">快速（PyMuPDF，约 10 秒）</div>
+      <div data-v="mineru" onclick="pickParse('mineru')">精细（MinerU，约 30~60 秒/篇）</div>
+    </div>
+  </div>
   <div class="dd" id="ddModel">
     <button class="dd-btn" onclick="toggleDD('ddModel')">模型：<b id="modelLabel">本机</b> ▾</button>
     <div class="dd-menu" id="modelMenu"></div>
@@ -242,8 +249,10 @@ const KIND_CN = {abstract:'摘要',introduction:'引言',related:'相关工作',
 
 let task = null, timer = null, currentFile = null;
 let RANGE = 'all';
+let PARSE = 'auto';
 let SETTINGS = null;
 const RANGE_LABEL = {all:'全文', core:'摘要+方法+实验', abstract:'仅摘要'};
+const PARSE_LABEL = {auto:'快速', mineru:'精细'};
 
 function toggleDD(id){
   const d = document.getElementById(id);
@@ -256,6 +265,12 @@ document.addEventListener('click', e => { if(!e.target.closest('.dd')) closeDD()
 function pickRange(v){
   RANGE = v;
   $('#rangeLabel').textContent = RANGE_LABEL[v] || v;
+  closeDD();
+}
+
+function pickParse(v){
+  PARSE = v;
+  $('#parseLabel').textContent = PARSE_LABEL[v] || v;
   closeDD();
 }
 
@@ -374,7 +389,7 @@ function kindsFor(range){
 async function start(path){
   const kinds = kindsFor(RANGE);
   const r = await api('/api/run', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({path, kinds})});
+    body: JSON.stringify({path, kinds, backend: PARSE})});
   if(r.error){ toast(r.error, 3500); return; }
   task = {id:r.task_id, status:'running', progress:0, sections:[], stage:'解析', stage_index:1};
   $('#center').innerHTML = '<div class="empty">正在解析 PDF…</div>';
@@ -481,17 +496,20 @@ function renderRead(t, streaming){
         ${p.translation ? `<div class="dst">${escapeHtml(p.translation)}</div>` : ''}
       </div>`).join('');
 
-    const tables = (s.tables || []).map(t => `
-      <div class="tblwrap">
-        <table class="tbl">${(t.rows || []).map((r, ri) => `<tr>${
-          (r || []).map(c => ri === 0 ? `<th>${escapeHtml(c)}</th>` : `<td>${escapeHtml(c)}</td>`).join('')
-        }</tr>`).join('')}</table>
-        <div class="pno">第 ${t.page} 页 · 表格（原文结构，未翻译）</div>
-      </div>`).join('');
+    const tables = (s.tables || []).map(t => {
+      // MinerU 给的是带 rowspan/colspan 的 HTML，直接渲染比拍平的二维数组准
+      const inner = t.html
+        ? t.html.replace(/<\/?table[^>]*>/gi, '').replace(/<tbody[^>]*>|<\/tbody>/gi, '')
+        : (t.rows || []).map((r, ri) => `<tr>${
+            (r || []).map(c => ri === 0 ? `<th>${escapeHtml(c)}</th>` : `<td>${escapeHtml(c)}</td>`).join('')
+          }</tr>`).join('');
+      return `<div class="tblwrap"><table class="tbl">${inner}</table>
+        <div class="pno">第 ${t.page} 页 · 表格（原文结构，未翻译）</div></div>`;
+    }).join('');
 
     const figs = (s.figures || []).length ? `<div class="figs">${s.figures.map(f => `
       <figure><img src="${f.url}" loading="lazy" onclick="zoomImg('${f.url}')">
-        <figcaption>第 ${f.page} 页 · 插图（点击放大）</figcaption></figure>`).join('')}</div>` : '';
+        <figcaption>第 ${f.page} 页 · ${escapeHtml(f.caption || '插图（点击放大）')}</figcaption></figure>`).join('')}</div>` : '';
 
     const snaps = (s.page_images || []).length ? `
       <details class="pages"><summary>查看原文页（${s.page_images.length} 页，含矢量图表）</summary>

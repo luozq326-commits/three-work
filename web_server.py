@@ -91,7 +91,13 @@ def _section_media(paper, idx: int) -> dict:
     figs, snaps = [], []
     for pno in range(start, end):
         for f in paper.figures.get(pno, []):
-            figs.append({"page": pno, "url": _media_url(f)})
+            figs.append(
+                {
+                    "page": pno,
+                    "url": _media_url(f),
+                    "caption": paper.captions.get(f, ""),
+                }
+            )
         if pno in paper.page_images:
             snaps.append({"page": pno, "url": _media_url(paper.page_images[pno])})
     return {"figures": figs, "page_images": snaps}
@@ -132,7 +138,7 @@ def _update(tid: str, **kw) -> None:
             TASKS[tid].update(kw)
 
 
-def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "") -> None:
+def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "", backend: str = "") -> None:
     """后台跑完整链路。每个阶段都回写进度，前端轮询即可。
 
     只允许一个任务同时跑（本地 8GB 显存扛不住并行），后来的排队等。
@@ -149,7 +155,7 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "") -> Non
         timings: dict[str, float] = {}
         # 1) 解析
         t0 = time.perf_counter()
-        paper = pdf_parse.parse_pdf(pdf_path, backend=config.PDF_BACKEND)
+        paper = pdf_parse.parse_pdf(pdf_path, backend=backend or config.PDF_BACKEND)
         timings["解析"] = time.perf_counter() - t0
         if paper.needs_ocr and not paper.ocr_used:
             _update(tid, status="error", error="扫描件识别失败，可能是图片质量太低")
@@ -550,10 +556,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "PDF 路径无效"}, 400)
                 return
             kinds = data.get("kinds") or ["*"]
+            backend = (data.get("backend") or "").strip()
             tid = _new_task(abs_path, kinds)
             title = TASKS[tid]["title"]
             threading.Thread(
-                target=_run_task, args=(tid, abs_path, kinds, title), daemon=True
+                target=_run_task, args=(tid, abs_path, kinds, title, backend), daemon=True
             ).start()
             self._json({"task_id": tid})
             return

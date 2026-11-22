@@ -9,8 +9,8 @@
 
 | 能力 | 说明 |
 |---|---|
-| PDF 解析 | PyMuPDF 2.0 版面模型，双栏不串行、标题层级自动识别 |
-| 图表保留 | 表格按结构渲染（不拍平）、插图单独提取、每页 110dpi 原页快照兜底矢量图 |
+| PDF 解析 | 双后端：PyMuPDF 版面模型（快，约 12s/篇）或 MinerU（准，约 30s/篇，带 bbox） |
+| 图表保留 | 表格按结构渲染（MinerU 档保留合并单元格）、插图按 bbox 裁剪、每页原页快照兜底 |
 | 段落级对照 | 每段标注原文页码，原文/译文逐段对齐，可按页回查 |
 | 扫描件 OCR | RapidOCR，图片页自动识别（约 15~40 秒/页） |
 | 术语一致性 | 术语库四步闭环：候选抽取 → 人工确认 → 翻译注入 → 译文校验重译 |
@@ -43,6 +43,21 @@ E:/Python312/python.exe web_server.py
 
 依赖：Python 3.12、`pymupdf`(2.0)、`pymupdf4llm`、`rapidocr-onnxruntime`、`qrcode`。
 Ollama 模型：`qwen2.5-coder:7b`（主力）、`nomic-embed-text`（检索）。
+
+### 可选：MinerU 精细解析
+
+默认走 PyMuPDF（12 秒/篇）。要更准的版面、表格合并单元格、图片 bbox、公式 LaTeX，装 MinerU：
+
+```bash
+E:/Python312/python.exe -m venv .venv-mineru
+.venv-mineru/Scripts/python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+.venv-mineru/Scripts/python.exe -m pip install "mineru[torch]"
+```
+
+- 装在独立 venv：torch / transformers 5.x 与主环境冲突，不能共装
+- 模型 835MB，首次运行自动下载；用 `MINERU_HOME` 指到 E 盘（默认 `~/.mineru` 会占 C 盘）
+- 推理走 DirectML，直接使用 NVIDIA 显卡，不需要 CUDA
+- 界面右上角「解析：快速 / 精细」切换；装了才显示可用
 
 ## 命令行用法
 
@@ -83,7 +98,8 @@ warmup.py        演示前预热
 | 单块翻译（1800 字符） | 约 7 秒，稳态 50 tok/s |
 | 摘要（1304 字符 / 2 段） | 7.6 秒；缓存命中后 0.01 秒 |
 | 全篇（50885 字符 / 36 块） | 320.8 秒（5.3 分钟） |
-| 解析（12~22 页） | 8~40 秒 |
+| 解析 · 快速（12~22 页） | 8~40 秒 |
+| 解析 · 精细（MinerU，12 页） | 28~36 秒，产出 15 个表格 HTML + 3 张图 + 2 条公式 |
 | 要素抽取 | 5~20 秒，evidence 回查命中率 100%（样本 6 篇） |
 | 多篇评测 | 6/6 成功，JSON 合法率 6/6，术语一致率 93.8%，41.5 tok/s |
 

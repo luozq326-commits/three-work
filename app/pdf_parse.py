@@ -11,8 +11,12 @@
 """
 
 import hashlib
+import json
+import os
 import re
+import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pymupdf
 
@@ -99,6 +103,7 @@ class ParsedPaper:
     # 页码 → 图片路径列表（论文里的插图）；页码 → 整页快照（矢量图、图表混排靠它兜底）
     figures: dict[int, list[str]] = field(default_factory=dict)
     page_images: dict[int, str] = field(default_factory=dict)
+    captions: dict[str, str] = field(default_factory=dict)  # 图片路径 → 图注
 
     def section(self, kind: str) -> Section | None:
         for s in self.sections:
@@ -435,6 +440,198 @@ def ocr_available() -> bool:
 _OCR_ENGINE = None
 
 
+# ---------------------------------------------------------------- MinerU 后端
+#
+# MinerU 4.x 装在独立 venv（torch/transformers 与主环境冲突），用子进程调用。
+# 它给出：阅读顺序、段落/标题层级、表格 HTML（含合并单元格）、公式 LaTeX、图片 bbox。
+# 代价是慢（12 页约 36s），所以做成可选后端，默认仍走 PyMuPDF。
+
+MINERU_VENV = config.ROOT / ".venv-mineru"
+MINERU_BRIDGE = config.ROOT / "tools" / "mineru_bridge.py"
+# 模型放 E 盘，别塞 C 盘用户目录（MinerU 默认 ~/.mineru，834MB）
+MINERU_HOME = str(config.ROOT.parent / "模型" / "mineru")
+MINERU_ENV = {
+    "MINERU_MODEL_SOURCE": "modelscope",
+    "MINERU_HOME": MINERU_HOME,
+    "MODELSCOPE_CACHE": str(config.ROOT.parent / "模型" / "mineru" / "hub"),
+    "HF_HOME": str(config.ROOT.parent / "模型" / "hf"),
+}
+
+
+def mineru_available() -> bool:
+    py = MINERU_VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    return py.exists() and MINERU_BRIDGE.exists()
+
+
+def _mineru_blocks(pdf_path: str) -> dict:
+    """调子进程跑 MinerU，返回 {pages, cost_s, blocks}。"""
+    py = MINERU_VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    out = config.DATA_DIR / "media" / "_mineru" / f"{Path(pdf_path).stem}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env.update(MINERU_ENV)
+    proc = subprocess.run(
+        [str(py), str(MINERU_BRIDGE), str(pdf_path), "--out", str(out)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=1800,
+    )
+    if proc.returncode != 0 or not out.exists():
+        raise RuntimeError(f"MinerU 解析失败：{(proc.stderr or proc.stdout)[-400:]}")
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def _html_rows(html: str) -> list[list[str]]:
+    """表格 HTML → 二维文本，供界面在拿不到富文本时降级渲染。"""
+    rows: list[list[str]] = []
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S | re.I):
+        cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S | re.I)
+        rows.append([re.sub(r"<[^>]+>", "", c).strip() for c in cells])
+    return rows
+
+
+def _title_hashes(text: str, level: int) -> str:
+    """章节标题 → markdown 井号（只用于 paragraph_title）。
+
+    MinerU 给的 level 不稳定（3.1 这种子标题也常标成 2），所以优先看编号深度：
+    一级章节给 "##"（切新章节），子标题给 "###"（留在正文里，不切碎）。
+    注意不能给 "#"——"#" 在我们这边是论文大标题，认不出类型会被丢掉。
+    """
+    m = re.match(r"^(\d+(?:\.\d+)*)\.?\s+\S", text.strip())
+    if m:
+        return "##" if len(m.group(1).split(".")) <= 1 else "###"
+    # 认得出类型的标题（Abstract / References / 无编号的 Conclusion）一律切章节，
+    # 否则 MinerU 给的 level 会把它们压成子标题，摘要就并进题名页了
+    if _classify(text):
+        return "##"
+    return "##" if int(level or 2) <= 1 else "###"
+
+
+def _blocks_to_markdown(blocks: list[dict]) -> tuple[list[str], list[dict], list[dict]]:
+    """MinerU 块 → 每页 markdown（复用现有切章逻辑）+ 表格 + 图片。"""
+    pages: dict[int, list[str]] = {}
+    tables: list[dict] = []
+    figures: list[dict] = []
+    in_refs = False
+    in_abstract = False
+
+    for b in blocks:
+        pno = b["page"]
+        btype = b["type"]
+        text = (b.get("text") or "").strip()
+
+        if btype in ("page_number", "page_footnote", "aside_text"):
+            continue  # 页码、脚注、页边文字：进正文只会污染
+
+        if btype == "table":
+            tables.append({"page": pno, "html": b.get("html") or "", "rows": _html_rows(b.get("html") or "")})
+            continue
+
+        if btype in ("image", "chart"):
+            figures.append({"page": pno, "bbox": b.get("bbox") or [], "caption": b.get("caption") or ""})
+            continue
+
+        if btype == "equation":
+            continue  # 公式单独存放，不送翻译（送进去容易被改写）
+
+        if btype == "ref_text":
+            if not in_refs:
+                in_refs = True
+                pages.setdefault(pno, []).append("## References")
+            pages.setdefault(pno, []).append(text)
+            pages.setdefault(pno, []).append("")  # 每条参考文献独立成段
+            continue
+
+        if btype == "doc_title":
+            pages.setdefault(pno, []).append(f"# {text}")  # 论文大标题，切章时会被丢掉
+            continue
+
+        if btype == "paragraph_title":
+            pages.setdefault(pno, []).append(f"{_title_hashes(text, b.get('level') or 2)} {text}")
+            continue
+
+        if btype == "text":
+            # MinerU 常把 Abstract 当普通正文（它没有编号，也不算标题），
+            # 这里补一个标题，否则摘要会被并进题名页，而摘要恰恰是最该翻的部分
+            if not in_abstract and re.match(r"^abstract\b[:.\s]", text, re.IGNORECASE):
+                in_abstract = True
+                pages.setdefault(pno, []).append("## Abstract")
+                text = re.sub(r"^abstract\b[:.\s]*", "", text, flags=re.IGNORECASE).strip()
+                if not text:
+                    continue
+
+        pages.setdefault(pno, []).append(text)
+        pages.setdefault(pno, []).append("")  # MinerU 的每个 text 块本身就是一段
+
+    total = (max(pages) if pages else 0)
+    md_pages = ["\n".join(pages.get(i, [])) for i in range(1, total + 1)]
+    return md_pages, tables, figures
+
+
+def parse_with_mineru(path: str) -> ParsedPaper:
+    """MinerU 解析：结构最准，但慢。"""
+    data = _mineru_blocks(path)
+    md_pages, tables, figures = _blocks_to_markdown(data["blocks"])
+    sections = split_sections_md(md_pages)
+    raw = "\n".join("\n".join(t for _, t in _md_to_lines(md)) for md in md_pages)
+
+    paper = ParsedPaper(
+        path=path,
+        page_count=data.get("pages") or len(md_pages),
+        needs_ocr=False,
+        sections=sections,
+        raw_text=raw,
+        backend="mineru",
+    )
+
+    # 表格按页挂到章节上
+    for t in tables:
+        for s in sections:
+            if s.page <= t["page"] <= _section_end_page(sections, s):
+                s.tables.append({"page": t["page"], "rows": t["rows"], "html": t["html"]})
+                break
+
+    # 图片：用 bbox 从原页裁出来，比整页截图精确得多
+    doc = pymupdf.open(path)
+    try:
+        _attach_media(paper, doc, path)
+        base = config.DATA_DIR / "media" / _pdf_digest(path)
+        for i, f in enumerate(figures):
+            pno = f["page"]
+            if not (1 <= pno <= doc.page_count) or len(f["bbox"]) != 4:
+                continue
+            page = doc[pno - 1]
+            x0, y0, x1, y1 = f["bbox"]
+            rect = pymupdf.Rect(
+                x0 * page.rect.width, y0 * page.rect.height,
+                x1 * page.rect.width, y1 * page.rect.height,
+            )
+            if rect.width < 40 or rect.height < 30:
+                continue
+            fp = base / f"mineru_p{pno}_{i}.png"
+            try:
+                page.get_pixmap(clip=rect, dpi=170).save(fp)
+                paper.figures.setdefault(pno, []).append(str(fp))
+                if f.get("caption"):
+                    paper.captions[str(fp)] = f["caption"]
+            except Exception:
+                continue
+    finally:
+        doc.close()
+    return paper
+
+
+def _section_end_page(sections: list[Section], sec: Section) -> int:
+    idx = sections.index(sec)
+    return sections[idx + 1].page if idx + 1 < len(sections) else 10**6
+
+
+def _pdf_digest(pdf_path: str) -> str:
+    with open(pdf_path, "rb") as f:
+        return hashlib.md5(f.read(4 * 1024 * 1024)).hexdigest()[:12]
+
+
 def ocr_image(path: str, lang: str = "ch") -> str:
     """对单张图片做 OCR，返回纯文本。手机拍照通道走这条路。
 
@@ -520,6 +717,14 @@ def parse_pdf(path: str, backend: str = "auto", ocr: bool = True) -> ParsedPaper
       True  —— 无文本层时自动走 OCR（约 30~60s/页，慢但能读扫描件）
       False —— 只标记 needs_ocr，不 OCR
     """
+    if backend == "mineru":
+        if not mineru_available():
+            raise RuntimeError(
+                "MinerU 未安装。需要 .venv-mineru 与 tools/mineru_bridge.py，"
+                "或用 backend='auto' 走 PyMuPDF"
+            )
+        return parse_with_mineru(path)
+
     doc = pymupdf.open(path)
     try:
         page_count = doc.page_count

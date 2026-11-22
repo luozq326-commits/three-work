@@ -5,3 +5,7 @@ __pycache__/
 
 # 网页界面的上传缓存：运行时产物，源 PDF 在 data/papers/ 里已有
 data/uploads/
+
+# MinerU 虚拟环境（1.4GB）与解析产物（每页快照 + 裁图），不入库
+.venv-mineru/
+data/media/
