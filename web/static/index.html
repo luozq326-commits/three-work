@@ -690,20 +690,21 @@ function renderRight(t){
   </div>
   <div class="panel-block"><h3>笔记</h3>
     <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
-      <button onclick="toggleEditNote()" id="btnEditNote">编辑</button>
-      <button onclick="downloadNote()">导出 Markdown</button>
+      <button onclick="toggleEditNote()" id="btnEditNote">编辑笔记</button>
+      <button onclick="downloadNote()">导出 .md</button>
+      <button onclick="copyNote()">复制全文</button>
     </div>
     <div class="note-md" id="noteView">${mdToHtml(t.note_md || '')}</div>
     <div id="noteEditor" class="hide" style="margin-top:8px">
       <textarea id="noteArea" style="width:100%;height:230px;font-family:ui-monospace,Consolas,monospace;
         font-size:12.5px;line-height:1.75"></textarea>
       <div style="display:flex;gap:8px;margin-top:8px">
-        <button class="primary" onclick="saveNote()">保存</button>
+        <button class="primary" onclick="saveNote()">保存笔记（覆盖原文）</button>
         <button onclick="toggleEditNote()">取消</button>
       </div>
     </div>
   </div>
-  <div class="panel-block"><h3>我的批注</h3>
+  <div class="panel-block"><h3>我的批注（独立保存，导出时附在末尾）</h3>
     <textarea id="annoArea" placeholder="读的时候想到什么写在这里，会跟笔记一起导出"
       style="width:100%;height:110px;font-size:13px;line-height:1.7"></textarea>
     <div style="margin-top:8px"><button onclick="saveAnno()">保存批注</button></div>
@@ -761,16 +762,29 @@ async function saveAnno(){
   toast(r.ok ? '批注已保存' : '保存失败');
 }
 
+// 导出走服务端下载：前端 blob + a.click() 在部分 Chrome 配置下只弹"另存为"却存成空文件
 function downloadNote(){
-  if(!task || !task.note_md) return;
-  let body = task.note_md;
+  if(!task || !task.note_id) return toast('还没有笔记可导出');
+  // 先把批注存一次，否则导出的是旧的
   const anno = ($('#annoArea') && $('#annoArea').value.trim()) || '';
-  if(anno) body += '\n\n## 我的批注\n\n' + anno + '\n';
-  const blob = new Blob([body], {type:'text/markdown;charset=utf-8'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = (task.title || 'note') + '.md';
-  a.click(); URL.revokeObjectURL(a.href);
+  if(anno){
+    api('/api/note/' + task.note_id, {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({user_note: anno})}).catch(()=>{});
+  }
+  location.href = '/api/note/' + task.note_id + '/export';
+}
+
+async function copyNote(){
+  if(!task || !task.note_md) return toast('还没有笔记');
+  const anno = ($('#annoArea') && $('#annoArea').value.trim()) || '';
+  const body = task.note_md + (anno ? '\n\n## 我的批注\n\n' + anno + '\n' : '');
+  copyText(body);
+}
+
+function copyText(t){
+  navigator.clipboard.writeText(t)
+    .then(() => toast('已复制到剪贴板'))
+    .catch(() => toast('复制失败，请手动选中'));
 }
 
 function escapeHtml(s){
@@ -840,6 +854,7 @@ $('#btnPhone').onclick = async () => {
          <div style="flex:1;min-width:240px;line-height:1.9">
            <div style="font-size:13px;color:var(--muted);margin-bottom:6px">手机扫这个码</div>
            <div style="font-size:15px;font-weight:600">${escapeHtml(url)}</div>
+           ${fwHtml(j)}
            <div style="color:var(--muted);font-size:12.5px;margin-top:10px">
              手机和电脑要在同一个 WiFi 下。<br>
              手机上拍照 → 识别英文 → 点翻译，全部在这台电脑上算，图片不出局域网。<br>
@@ -849,6 +864,25 @@ $('#btnPhone').onclick = async () => {
        </div>`;
   $('#mask').classList.add('show');
 };
+
+// 手机连不上九成是防火墙：WLAN 常被识别为「公用网络」，默认拦入站
+function fwHtml(j){
+  const fw = j.firewall || {};
+  if(fw.rule) {
+    return `<div style="margin-top:8px;font-size:12.5px;color:var(--ok)">
+      ✓ 防火墙已放行 ${fw.port} 端口</div>`;
+  }
+  return `<div style="margin-top:8px;padding:9px 11px;border:1px solid var(--warn);border-radius:7px;
+      font-size:12.5px;line-height:1.85;color:var(--warn)">
+      ⚠ 防火墙还没放行 ${fw.port} 端口${fw.profile ? `（当前网络：${fw.profile}）` : ''}，手机可能连不上。<br>
+      用<b>管理员</b>身份打开 PowerShell 执行：
+      <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
+        <code id="fwCmd" style="flex:1;background:#1c2029;padding:6px 8px;border-radius:5px;
+          font-size:11.5px;color:var(--text);word-break:break-all">${escapeHtml(j.fix_cmd||'')}</code>
+        <button onclick="copyText(document.getElementById('fwCmd').textContent)" style="padding:4px 9px">复制</button>
+      </div>
+    </div>`;
+}
 
 /* ---------- 术语库 ---------- */
 $('#btnTerms').onclick = async () => {

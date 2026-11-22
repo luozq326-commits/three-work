@@ -31,12 +31,14 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import threading
 import time
 import traceback
 import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import quote
 from urllib.parse import parse_qs, urlparse
 
 from app import cache, config, extract, llm, note, pdf_parse, search, settings, summarize, terms, translate
@@ -66,6 +68,51 @@ def _lan_ip() -> str:
         return "127.0.0.1"
     finally:
         s.close()
+
+
+def _decode_cmd(data: bytes) -> str:
+    """netsh 的输出在不同系统语言/版本下可能是 UTF-8 或 GBK，两种都试。"""
+    for enc in ("utf-8", "gbk"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", "ignore")
+
+
+def _firewall_state(port: int) -> dict:
+    """查 Windows 防火墙是否放行了这个端口。
+
+    手机扫码连不上，九成是这里：WLAN 常被识别为「公用网络」，
+    默认 BlockInbound，浏览器能开本机页面但手机连不进来。
+    """
+    rule = f"PaperReader {port}"
+    info = {"rule": False, "profile": "", "blocked": None, "port": port}
+    try:
+        out = _decode_cmd(
+            subprocess.run(
+                ["netsh", "advfirewall", "firewall", "show", "rule", f"name={rule}"],
+                capture_output=True,
+            ).stdout
+        )
+        # 有规则时输出里会带规则名；没有时是一句"没有与指定标准相匹配的规则"
+        info["rule"] = rule in out
+    except Exception:
+        pass
+    try:
+        out = _decode_cmd(
+            subprocess.run(
+                ["netsh", "advfirewall", "show", "currentprofile"], capture_output=True
+            ).stdout
+        )
+        for name in ("公用", "专用", "域"):
+            if f"{name}配置文件" in out:
+                info["profile"] = name
+                break
+        info["blocked"] = "BlockInbound" in out
+    except Exception:
+        pass
+    return info
 
 
 # ---------------------------------------------------------------- 任务执行
@@ -435,7 +482,22 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
         if path == "/api/lan":
-            self._json({"url": f"http://{_lan_ip()}:{self.server.server_address[1]}/mobile"})
+            port = self.server.server_address[1]
+            ip = _lan_ip()
+            fw = _firewall_state(port)
+            self._json(
+                {
+                    "url": f"http://{ip}:{port}/mobile",
+                    "ip": ip,
+                    "port": port,
+                    "firewall": fw,
+                    # 给用户一键复制：加规则需要管理员权限，程序自己提不了权
+                    "fix_cmd": (
+                        f'netsh advfirewall firewall add rule name="PaperReader {port}" '
+                        f"dir=in action=allow protocol=TCP localport={port}"
+                    ),
+                }
+            )
             return
         if path == "/api/search":
             query = (q.get("q") or [""])[0]
@@ -479,6 +541,31 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/notes":
             self._json({"notes": note.list_notes()})
+            return
+        # 导出笔记：走服务端下载，比前端 blob + a.click() 稳（后者在部分 Chrome 配置下会弹"另存为"且存成空文件）
+        m = re.match(r"^/api/note/(\d+)/export$", path)
+        if m:
+            row = note.load(int(m.group(1)))
+            if not row:
+                self._json({"error": "not found"}, 404)
+                return
+            body = row.get("note_md") or ""
+            if row.get("user_note"):
+                body += "\n\n## 我的批注\n\n" + row["user_note"].strip() + "\n"
+            if not body.strip():
+                self._json({"error": "这条笔记是空的"}, 404)
+                return
+            data = body.encode("utf-8")
+            fname = re.sub(r'[\\/:*?"<>|]+', "_", (row.get("title") or "note"))[:60] + ".md"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/markdown; charset=utf-8")
+            self.send_header(
+                "Content-Disposition",
+                f"attachment; filename=note.md; filename*=UTF-8''{quote(fname)}",
+            )
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return
         if path.startswith("/api/note/"):
             nid = int(path.rsplit("/", 1)[-1])
