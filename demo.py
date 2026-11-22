@@ -74,13 +74,14 @@ def main() -> int:
             print(f"   [跳过] 没有匹配的章节：{args.sections}")
         t0 = time.perf_counter()
         for s in targets:
-            print(f"   [{s.kind}] {s.char_count} 字符")
+            print(f"   [{s.kind}] {s.char_count} 字符 / {len(s.paras)} 段")
             try:
-                r = translate.translate_text(s.text)
+                r = translate.translate_paragraphs(s.paras)
                 translated.append((s, r))
                 print(
-                    f"     块 {len(r['chunks'])}，{_fmt(r['total_s'])}，"
-                    f"{r['tok_per_s']} tok/s，术语一致率 {r['term_rate'] * 100:.0f}%"
+                    f"     块 {r['chunks']}，{_fmt(r['total_s'])}，"
+                    f"{r['tok_per_s']} tok/s，一致率 {r['term_rate'] * 100:.0f}%，"
+                    f"对齐 {r['aligned_rate'] * 100:.0f}%，缓存 {r['cache_hits']}"
                 )
             except Exception as exc:
                 print(f"     [失败] {exc}")
@@ -90,12 +91,26 @@ def main() -> int:
         if translated:
             os.makedirs(args.out, exist_ok=True)
             zh_path = os.path.join(args.out, f"{title}.zh.md")
-            parts = [f"# {title}", "", "> 机器翻译，术语库约束生效；原文为英文，术语一致率见文末。", ""]
+            parts = [
+                f"# {title}",
+                "",
+                "> 机器翻译，术语库约束生效。每段前标注原文页码，便于回查。",
+                "",
+            ]
             for s, r in translated:
-                parts += [f"## {s.title}", "", r["full_text"], ""]
+                parts += [f"## {s.title}", ""]
+                for p in r["paras"]:
+                    if not p["translation"]:
+                        continue
+                    parts += [f"`p{p['page']}` {p['translation']}", ""]
             rate = sum(r["term_rate"] for _, r in translated) / len(translated)
-            bad = sum(len(c["verify"]["violations"]) for _, r in translated for c in r["chunks"])
-            parts += ["---", "", f"术语一致率 {rate * 100:.1f}%，违例 {bad} 处。"]
+            bad = sum(r["violations"] for _, r in translated)
+            hits = sum(r["cache_hits"] for _, r in translated)
+            parts += [
+                "---",
+                "",
+                f"术语一致率 {rate * 100:.1f}%，违例 {bad} 处，缓存命中 {hits} 段。",
+            ]
             with open(zh_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(parts))
             print(f"   译文写入 {zh_path}（{sum(s.char_count for s, _ in translated)} 字符）")

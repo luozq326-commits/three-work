@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS note (
     paper_path  TEXT NOT NULL,
     title       TEXT DEFAULT '',
     note_md     TEXT NOT NULL,
+    user_note   TEXT DEFAULT '',
     elements    TEXT DEFAULT '{}',
     term_rate   REAL DEFAULT 1.0,
     created_at  TEXT
@@ -41,6 +42,10 @@ def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    # 旧库补列：批注是后加的能力，老数据不该因此读不出来
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(note)")}
+    if "user_note" not in cols:
+        conn.execute("ALTER TABLE note ADD COLUMN user_note TEXT DEFAULT ''")
     return conn
 
 
@@ -174,11 +179,31 @@ def load(note_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+def update(note_id: int, note_md: str | None = None, user_note: str | None = None) -> bool:
+    """改笔记正文或批注。只改传进来的字段，None 表示不动。"""
+    sets, args = [], []
+    if note_md is not None:
+        sets.append("note_md = ?")
+        args.append(note_md)
+    if user_note is not None:
+        sets.append("user_note = ?")
+        args.append(user_note)
+    if not sets:
+        return False
+    args.append(note_id)
+    with _conn() as conn:
+        cur = conn.execute(f"UPDATE note SET {', '.join(sets)} WHERE id = ?", args)
+        return cur.rowcount > 0
+
+
 def export_markdown(note_id: int, path: str) -> str:
-    """把一条笔记写成 .md 文件，返回路径。"""
+    """把一条笔记写成 .md 文件（含批注），返回路径。"""
     row = load(note_id)
     if not row:
         raise ValueError(f"笔记 {note_id} 不存在")
+    body = row["note_md"]
+    if (row.get("user_note") or "").strip():
+        body += "\n\n## 我的批注\n\n" + row["user_note"].strip() + "\n"
     with open(path, "w", encoding="utf-8") as f:
-        f.write(row["note_md"])
+        f.write(body)
     return path

@@ -76,6 +76,7 @@ class Section:
     page: int          # 起始页码，从 1 开始
     text: str
     level: int = 2     # 标题层级，1=一级标题，2=二级，0=无标题（front matter）
+    paras: list[dict] = field(default_factory=list)  # [{page, text}]，段落级对齐用
 
     @property
     def char_count(self) -> int:
@@ -256,19 +257,38 @@ def _classify(title: str) -> str | None:
 
 
 def split_sections_md(pages_md: list[str]) -> list[Section]:
-    """用版面模型给出的标题层级切章节。
+    """用版面模型给出的标题层级切章节，同时攒出带页码的段落。
 
     规则：
       - 一级标题：能认出章节类型才算章节，否则当论文大标题丢掉
       - 二级标题：一律切新章节，认不出类型记为 other（不丢内容）
       - 三级及以下：当正文里的子标题保留，不切分，避免 3.1/3.2 把方法章撕碎
+
+    段落按空行切，记录段落起始页——UI 要能"点译文跳到原文第几页"。
     """
     sections: list[Section] = []
     current = Section(kind="front", title="(front matter)", page=1, text="", level=0)
     saw_heading = False
+    buf: list[str] = []
+    buf_page = 1
 
-    def flush(new: Section) -> None:
+    def flush_par() -> None:
+        nonlocal buf
+        if buf:
+            t = "\n".join(buf).strip()
+            if t:
+                current.paras.append({"page": buf_page, "text": t})
+            buf = []
+
+    def add_line(text: str, page_no: int) -> None:
+        nonlocal buf_page
+        if not buf:
+            buf_page = page_no
+        buf.append(text)
+
+    def flush_sec(new: Section) -> None:
         nonlocal current
+        flush_par()
         if current.text.strip():
             sections.append(current)
         current = new
@@ -276,6 +296,7 @@ def split_sections_md(pages_md: list[str]) -> list[Section]:
     for page_no, md in enumerate(pages_md, start=1):
         for level, text in _md_to_lines(md):
             if not text:
+                flush_par()
                 if current.text and not current.text.endswith("\n"):
                     current.text += "\n"
                 continue
@@ -284,13 +305,13 @@ def split_sections_md(pages_md: list[str]) -> list[Section]:
                 kind = _classify(text)
                 if kind:
                     saw_heading = True
-                    flush(Section(kind=kind, title=text, page=page_no, text="", level=1))
+                    flush_sec(Section(kind=kind, title=text, page=page_no, text="", level=1))
                 continue  # 论文大标题
 
             if level == 2:
                 saw_heading = True
                 kind = _classify(text) or "other"
-                flush(Section(kind=kind, title=text, page=page_no, text="", level=2))
+                flush_sec(Section(kind=kind, title=text, page=page_no, text="", level=2))
                 continue
 
             if level >= 3:
@@ -300,8 +321,9 @@ def split_sections_md(pages_md: list[str]) -> list[Section]:
                     kind = "references" if re.match(
                         r"^(references|bibliography|参考文献)$", text.strip(), re.I
                     ) else "acknowledg"
-                    flush(Section(kind=kind, title=text.strip(), page=page_no, text="", level=3))
+                    flush_sec(Section(kind=kind, title=text.strip(), page=page_no, text="", level=3))
                 else:
+                    add_line(text, page_no)
                     current.text += f"\n{text}\n"
                 continue
 
@@ -312,7 +334,7 @@ def split_sections_md(pages_md: list[str]) -> list[Section]:
                 kind = "references" if re.match(
                     r"^(references|bibliography|参考文献)$", stripped, re.I
                 ) else "acknowledg"
-                flush(Section(kind=kind, title=stripped, page=page_no, text="", level=2))
+                flush_sec(Section(kind=kind, title=stripped, page=page_no, text="", level=2))
                 continue
             # 版面模型常把 "…inspiration. References [1] Jimmy Lei Ba, …" 塞进同一段
             inline = _INLINE_REFS.search(stripped)
@@ -321,14 +343,20 @@ def split_sections_md(pages_md: list[str]) -> list[Section]:
                 after = stripped[inline.end():].strip()
                 saw_heading = True
                 if before:
+                    add_line(before, page_no)
                     current.text += before + "\n"
-                flush(
-                    Section(kind="references", title=inline.group(1), page=page_no,
-                            text=(after + "\n") if after else "", level=2)
+                flush_sec(
+                    Section(kind="references", title=inline.group(1), page=page_no, text="", level=2)
                 )
+                if after:
+                    add_line(after, page_no)
+                    current.text += after + "\n"
+                    flush_par()
                 continue
+            add_line(text, page_no)
             current.text += text + "\n"
 
+    flush_par()
     if current.text.strip():
         sections.append(current)
 
@@ -385,6 +413,17 @@ def ocr_image(path: str, lang: str = "ch") -> str:
         return ""
     # result 每项：[框坐标, 文本, 置信度]
     return "\n".join(item[1] for item in result if len(item) > 1 and item[1].strip())
+
+
+def _fill_paras_fallback(sections: list[Section]) -> None:
+    """blocks 后端拿不到逐行页码，按空行切段、页码用章节起始页兜底。"""
+    for s in sections:
+        if s.paras:
+            continue
+        chunks = [p.strip() for p in re.split(r"\n\s*\n", s.text) if p.strip()]
+        if len(chunks) <= 1:
+            chunks = [p.strip() for p in s.text.split("\n") if p.strip()]
+        s.paras = [{"page": s.page, "text": p} for p in chunks]
 
 
 def parse_pdf(path: str, backend: str = "auto", ocr: bool = True) -> ParsedPaper:
@@ -444,11 +483,13 @@ def parse_pdf(path: str, backend: str = "auto", ocr: bool = True) -> ParsedPaper
                 if backend == "layout":
                     raise
         pages = [_page_text(p) for p in doc]
+        blocks_sections = split_sections(pages)
+        _fill_paras_fallback(blocks_sections)
         return ParsedPaper(
             path=path,
             page_count=page_count,
             needs_ocr=False,
-            sections=split_sections(pages),
+            sections=blocks_sections,
             raw_text="\n".join(pages),
             backend="blocks",
         )

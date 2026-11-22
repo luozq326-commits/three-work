@@ -39,7 +39,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from app import config, extract, llm, note, pdf_parse, search, terms, translate
+from app import cache, config, extract, llm, note, pdf_parse, search, terms, translate
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(ROOT, "web", "static")
@@ -52,6 +52,8 @@ MAX_UPLOAD = 80 * 1024 * 1024  # 80MB，够放一篇带图的论文
 TASKS: dict[str, dict] = {}
 TASK_LOCK = threading.Lock()
 LAST_TASK_ID: str | None = None  # 刷新页面后还能接回上一次的结果
+# 本地 8GB 显存扛不住并行推理，同一时间只跑一个任务，其余排队
+_RUN_SLOTS = threading.Semaphore(1)
 
 
 def _lan_ip() -> str:
@@ -104,15 +106,26 @@ def _update(tid: str, **kw) -> None:
 
 
 def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "") -> None:
-    """后台跑完整链路。每个阶段都回写进度，前端轮询即可。"""
-    timings: dict[str, float] = {}
+    """后台跑完整链路。每个阶段都回写进度，前端轮询即可。
+
+    只允许一个任务同时跑（本地 8GB 显存扛不住并行），后来的排队等。
+    """
+    if not _RUN_SLOTS.acquire(blocking=False):
+        _update(tid, status="queued", stage="排队中", stage_index=0)
+        _RUN_SLOTS.acquire()
+
+    def cancelled() -> bool:
+        with TASK_LOCK:
+            return bool(TASKS.get(tid, {}).get("cancel"))
+
     try:
+        timings: dict[str, float] = {}
         # 1) 解析
         t0 = time.perf_counter()
         paper = pdf_parse.parse_pdf(pdf_path, backend=config.PDF_BACKEND)
         timings["解析"] = time.perf_counter() - t0
-        if paper.needs_ocr:
-            _update(tid, status="error", error="这是扫描件（无文本层），当前版本不支持 OCR")
+        if paper.needs_ocr and not paper.ocr_used:
+            _update(tid, status="error", error="扫描件识别失败，可能是图片质量太低")
             return
 
         sections = [
@@ -122,9 +135,12 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "") -> Non
                 "page": s.page,
                 "chars": s.char_count,
                 "text": s.text.strip(),
-                "translation": "",
+                "paras": [],
                 "term_rate": None,
                 "violations": 0,
+                "chunks": 0,
+                "seconds": 0.0,
+                "cache_hits": 0,
             }
             for s in paper.sections
         ]
@@ -133,33 +149,52 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "") -> Non
             sections=sections,
             pages=paper.page_count,
             backend=paper.backend,
+            ocr_used=paper.ocr_used,
             timings=dict(timings),
+            status="running",
             stage="翻译",
             stage_index=2,
             progress=0.05,
         )
 
-        # 2) 翻译（按章节逐个推进，前端能边翻边读）
+        # 2) 翻译：按章节推进，章节内按段落推进，前端能边翻边读
         targets = [i for i, s in enumerate(sections) if s["kind"] in kinds]
         if not targets:
             targets = [i for i, s in enumerate(sections) if s["kind"] in ("abstract",)]
         t0 = time.perf_counter()
-        for n, idx in enumerate(targets, start=1):
+        done_units = 0
+        total_units = sum(len(paper.sections[i].paras) or 1 for i in targets) or 1
+        for idx in targets:
+            if cancelled():
+                _update(tid, status="cancelled", stage="已取消")
+                return
             sec = sections[idx]
+            src_section = paper.sections[idx]
             try:
-                r = translate.translate_text(sec["text"])
-                sec["translation"] = r["full_text"]
+                r = translate.translate_paragraphs(src_section.paras or [
+                    {"page": src_section.page, "text": src_section.text}
+                ])
+                sec["paras"] = r["paras"]
                 sec["term_rate"] = r["term_rate"]
-                sec["violations"] = sum(len(c["verify"]["violations"]) for c in r["chunks"])
-                sec["chunks"] = len(r["chunks"])
+                sec["violations"] = r["violations"]
+                sec["chunks"] = r["chunks"]
                 sec["seconds"] = r["total_s"]
-                sec["tok_s"] = r["tok_per_s"]
+                sec["cache_hits"] = r["cache_hits"]
+                sec["aligned_rate"] = r["aligned_rate"]
             except Exception as exc:
-                sec["translation"] = ""
                 sec["error"] = f"{type(exc).__name__}: {exc}"
-            _update(tid, sections=sections, progress=0.05 + 0.6 * n / max(len(targets), 1))
+            done_units += len(src_section.paras) or 1
+            _update(
+                tid,
+                sections=sections,
+                progress=0.05 + 0.6 * min(done_units / total_units, 1.0),
+            )
         timings["翻译"] = time.perf_counter() - t0
         _update(tid, timings=dict(timings), stage="要素抽取", stage_index=3, progress=0.7)
+
+        if cancelled():
+            _update(tid, status="cancelled", stage="已取消")
+            return
 
         # 3) 抽取
         t0 = time.perf_counter()
@@ -199,6 +234,8 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "") -> Non
     except Exception as exc:
         _update(tid, status="error", error=f"{type(exc).__name__}: {exc}")
         traceback.print_exc()
+    finally:
+        _RUN_SLOTS.release()
 
 
 # ---------------------------------------------------------------- HTTP 层
@@ -344,6 +381,39 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         path = u.path
         q = parse_qs(u.query)
+
+        # 取消任务：worker 在章节之间检查这个标记
+        m = re.match(r"^/api/task/([0-9a-zA-Z]+)/cancel$", path)
+        if m:
+            tid = m.group(1)
+            with TASK_LOCK:
+                t = TASKS.get(tid)
+                if not t:
+                    self._json({"error": "任务不存在"}, 404)
+                    return
+                t["cancel"] = True
+                if t["status"] == "queued":
+                    t["status"] = "cancelled"
+                    t["stage"] = "已取消"
+            self._json({"ok": True})
+            return
+
+        # 改笔记正文或批注
+        m = re.match(r"^/api/note/(\d+)$", path)
+        if m:
+            nid = int(m.group(1))
+            data = self._body()
+            ok = note.update(
+                nid,
+                note_md=data.get("note_md"),
+                user_note=data.get("user_note"),
+            )
+            self._json({"ok": ok})
+            return
+
+        if path == "/api/cache/clear":
+            self._json({"cleared": cache.clear()})
+            return
 
         if path == "/api/upload":
             name = (q.get("name") or ["paper.pdf"])[0]

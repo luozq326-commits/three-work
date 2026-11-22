@@ -75,11 +75,16 @@
     border-bottom:1px solid var(--line); background:var(--panel-2); font-size:13px}
   .card-h .k{font-size:10.5px; padding:1px 6px; border-radius:4px; background:#2a3140; color:var(--muted)}
   .card-h .rate{margin-left:auto; font-size:11.5px; color:var(--muted)}
-  .card-b{padding:14px 16px; display:grid; gap:14px}
+  .card-b{padding:6px 16px 12px; display:grid; gap:2px}
   .pair{display:grid; gap:6px}
   .pair .lab{font-size:11px; color:var(--dim); letter-spacing:.05em}
+  .para{display:grid; gap:5px; padding:11px 0; border-bottom:1px dashed var(--line)}
+  .para:last-child{border-bottom:none}
+  .pno{font-size:10.5px; color:var(--dim); letter-spacing:.04em}
+  .pno b{color:var(--accent); font-weight:600}
   .src{color:#a8b0c0; font-size:13px; font-family:ui-serif,Georgia,serif; line-height:1.7}
   .dst{color:var(--text); font-size:14px; line-height:1.85; white-space:pre-wrap}
+  .cached{font-size:10px; color:var(--ok); margin-left:6px}
   .empty{padding:60px 34px; color:var(--muted); text-align:center; line-height:2}
   .empty kbd{background:var(--panel-2); border:1px solid var(--line); border-radius:5px;
     padding:1px 6px; font-size:12px}
@@ -268,17 +273,24 @@ async function poll(){
   task = t;
   setBar(t.progress || 0);
   renderToc(t);
-  if(t.status === 'running'){
+  if(t.status === 'queued'){
+    $('#center').innerHTML = `<div class="empty">前面还有任务在跑，已排队…<br>
+      <span style="font-size:12.5px">本地只有一块 8GB 显存，同时跑两个会互相拖慢</span></div>`;
+  }else if(t.status === 'running'){
     const label = `${t.stage}（${t.stage_index}/${t.stage_total}）`;
     if(!$('#runningTip')){
       $('#center').innerHTML = `<div class="empty" id="runningTip">${label}…<br>
-        <span style="font-size:12.5px">翻译按章节推进，已完成的章节会陆续出现</span></div>`;
+        <span style="font-size:12.5px">翻译按段落推进，已完成的会陆续出现</span></div>`;
     }else{ $('#runningTip').firstChild.textContent = label + '…'; }
     renderRead(t, true);
   }else if(t.status === 'done'){
     clearInterval(timer); timer = null; setBar(1);
     renderRead(t, false); renderRight(t);
     toast('处理完成，笔记已保存');
+  }else if(t.status === 'cancelled'){
+    clearInterval(timer); timer = null;
+    renderRead(t, false); renderRight(t);
+    toast('已停止，已译完的段落保留在页面上');
   }else if(t.status === 'error'){
     clearInterval(timer); timer = null;
     $('#center').innerHTML = `<div class="empty">处理失败<br>
@@ -289,15 +301,16 @@ async function poll(){
 /* ---------- 渲染：章节列表 ---------- */
 function renderToc(t){
   const box = $('#toc'); if(!t.sections || !t.sections.length) return;
-  const sig = t.sections.map(s => s.translation ? 1 : 0).join('');
+  const sig = t.sections.map(s => (s.paras||[]).some(p=>p.translation) ? 1 : 0).join('');
   if(box.dataset.sig === sig) return;
   box.dataset.sig = sig; box.innerHTML = '';
   t.sections.forEach((s, i) => {
-    const it = el('div', 'toc-item' + (s.translation ? ' done' : ''));
+    const done = (s.paras||[]).some(p => p.translation);
+    const it = el('div', 'toc-item' + (done ? ' done' : ''));
     it.dataset.idx = i;
     it.append(el('span','k', KIND_CN[s.kind] || s.kind));
     it.append(el('span','t', s.title));
-    it.append(el('span','n', s.translation ? '已译' : s.chars + '字'));
+    it.append(el('span','n', done ? '已译' : s.chars + '字'));
     it.onclick = () => {
       document.querySelectorAll('.toc-item').forEach(x=>x.classList.remove('active'));
       it.classList.add('active');
@@ -312,36 +325,53 @@ function renderToc(t){
 function renderRead(t, streaming){
   if(!t.sections || !t.sections.length) return;
   const center = $('#center');
-  // 内容没变化就不重绘：轮询期间整块重绘会把阅读位置弹回顶部
-  const done = t.sections.filter(s => s.translation).length;
-  const sig = [t.sections.length, streaming ? 1 : 0, done, t.status].join('|');
+  const paraDone = t.sections.reduce((n,s)=>n+(s.paras||[]).filter(p=>p.translation).length,0);
+  const paraAll = t.sections.reduce((n,s)=>n+(s.paras||[]).length,0);
+  const sig = [t.sections.length, streaming?1:0, t.status, paraDone, paraAll].join('|');
   if(center.dataset.sig === sig) return;
   center.dataset.sig = sig;
   const keepY = center.scrollTop;
 
   let html = `<div class="paper-title">${t.title || ''}</div>
-    <div class="paper-meta">${t.pages || '—'} 页 · 解析后端 ${t.backend || '—'} ·
-    ${t.sections.length} 个章节 · 已译 ${done} 章</div>`;
-  if(streaming) html += `<div class="warnbox">正在翻译，可以先读已完成的章节。全文约需 4~6 分钟。</div>`;
+    <div class="paper-meta">${t.pages || '—'} 页 · 解析 ${t.backend || '—'} ·
+    ${t.sections.length} 章 · 段落 ${paraDone}/${paraAll} 已译</div>`;
+  if(streaming){
+    html += `<div class="warnbox" style="display:flex;align-items:center;gap:12px">
+      <span style="flex:1">正在翻译（${t.stage||''}），已完成的段落可以先读。全文约 4~6 分钟。</span>
+      <button onclick="cancelTask()" style="padding:5px 12px">停止</button></div>`;
+  }
   t.sections.forEach((s, i) => {
-    if(!s.translation && streaming) return;
-    html += `<div class="card" id="sec-${i}">
-      <div class="card-h">
+    const paras = s.paras || [];
+    const translated = paras.some(p => p.translation);
+    if(!translated && streaming) return;
+    const rate = s.term_rate;
+    const head = `<div class="card-h">
         <span class="k">${KIND_CN[s.kind] || s.kind}</span>
         <span>${escapeHtml(s.title)}</span>
-        ${s.term_rate !== null && s.term_rate !== undefined
-          ? `<span class="rate">一致率 ${(s.term_rate*100).toFixed(0)}%${
-              s.violations ? ` · 违例 ${s.violations}` : ''} · ${s.chunks||0} 块 · ${(s.seconds||0).toFixed(1)}s</span>`
+        ${rate !== null && rate !== undefined
+          ? `<span class="rate">一致率 ${(rate*100).toFixed(0)}%${
+              s.violations ? ` · 违例 ${s.violations}` : ''} · ${paras.length} 段 · ${(s.seconds||0).toFixed(1)}s${
+              s.cache_hits ? ` · 缓存 ${s.cache_hits}` : ''}</span>`
           : ''}
-      </div>
-      <div class="card-b">
-        <div class="pair"><div class="lab">原文</div><div class="src">${escapeHtml(s.text)}</div></div>
-        ${s.translation ? `<div class="pair"><div class="lab">译文</div><div class="dst">${escapeHtml(s.translation)}</div></div>` : ''}
-        ${s.error ? `<div class="field"><div class="fv" style="color:var(--bad)">翻译失败：${escapeHtml(s.error)}</div></div>` : ''}
-      </div></div>`;
+      </div>`;
+    const body = paras.map(p => `
+      <div class="para">
+        <div class="pno">第 <b>${p.page}</b> 页${p.cached ? '<span class="cached">缓存</span>' : ''}${
+          p.aligned === false ? '<span style="color:var(--warn)"> · 未按段对齐</span>' : ''}</div>
+        <div class="src">${escapeHtml(p.source)}</div>
+        ${p.translation ? `<div class="dst">${escapeHtml(p.translation)}</div>` : ''}
+      </div>`).join('');
+    html += `<div class="card" id="sec-${i}">${head}<div class="card-b">${
+      body || '<div class="src" style="color:var(--dim)">（未翻译）</div>'}</div></div>`;
   });
   center.innerHTML = html;
   center.scrollTop = keepY;
+}
+
+async function cancelTask(){
+  if(!task) return;
+  await api('/api/task/' + task.id + '/cancel', {method:'POST'});
+  toast('已请求停止，当前段落译完就停');
 }
 
 /* ---------- 渲染：右栏要素 ---------- */
@@ -384,17 +414,72 @@ function renderRight(t){
     ${(e.evidence||[]).map(ev => `<div class="ev"><b>${escapeHtml(ev.field)}</b> ${ev.verified?'<span class="chip ok">已回查</span>':'<span class="chip bad">未命中</span>'}<br>${escapeHtml(ev.quote)}</div>`).join('') || '<span style="color:var(--dim)">—</span>'}
   </div>
   <div class="panel-block"><h3>笔记</h3>
-    <div style="display:flex;gap:8px;margin-bottom:10px">
+    <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+      <button onclick="toggleEditNote()" id="btnEditNote">编辑</button>
       <button onclick="downloadNote()">导出 Markdown</button>
     </div>
-    <div class="note-md">${mdToHtml(t.note_md || '')}</div>
+    <div class="note-md" id="noteView">${mdToHtml(t.note_md || '')}</div>
+    <div id="noteEditor" class="hide" style="margin-top:8px">
+      <textarea id="noteArea" style="width:100%;height:230px;font-family:ui-monospace,Consolas,monospace;
+        font-size:12.5px;line-height:1.75"></textarea>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="primary" onclick="saveNote()">保存</button>
+        <button onclick="toggleEditNote()">取消</button>
+      </div>
+    </div>
+  </div>
+  <div class="panel-block"><h3>我的批注</h3>
+    <textarea id="annoArea" placeholder="读的时候想到什么写在这里，会跟笔记一起导出"
+      style="width:100%;height:110px;font-size:13px;line-height:1.7"></textarea>
+    <div style="margin-top:8px"><button onclick="saveAnno()">保存批注</button></div>
   </div>`;
   right.innerHTML = html;
+  if(t.note_id){
+    api('/api/note/' + t.note_id).then(n => {
+      if(n && n.user_note && $('#annoArea')) $('#annoArea').value = n.user_note;
+    }).catch(()=>{});
+  }
+}
+
+function toggleEditNote(){
+  const ed = $('#noteEditor'), v = $('#noteView'), btn = $('#btnEditNote');
+  if(!ed) return;
+  if(ed.classList.contains('hide')){
+    ed.classList.remove('hide'); v.classList.add('hide');
+    $('#noteArea').value = task.note_md || '';
+    btn.textContent = '收起';
+  }else{
+    ed.classList.add('hide'); v.classList.remove('hide');
+    btn.textContent = '编辑';
+  }
+}
+
+async function saveNote(){
+  if(!task || !task.note_id) return toast('还没有笔记');
+  const md = $('#noteArea').value;
+  const r = await api('/api/note/' + task.note_id, {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({note_md: md})});
+  if(r.ok){
+    task.note_md = md;
+    $('#noteView').innerHTML = mdToHtml(md);
+    toggleEditNote(); toast('笔记已保存');
+  }else{ toast('保存失败'); }
+}
+
+async function saveAnno(){
+  if(!task || !task.note_id) return toast('还没有笔记');
+  const v = $('#annoArea').value;
+  const r = await api('/api/note/' + task.note_id, {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_note: v})});
+  toast(r.ok ? '批注已保存' : '保存失败');
 }
 
 function downloadNote(){
   if(!task || !task.note_md) return;
-  const blob = new Blob([task.note_md], {type:'text/markdown;charset=utf-8'});
+  let body = task.note_md;
+  const anno = ($('#annoArea') && $('#annoArea').value.trim()) || '';
+  if(anno) body += '\n\n## 我的批注\n\n' + anno + '\n';
+  const blob = new Blob([body], {type:'text/markdown;charset=utf-8'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = (task.title || 'note') + '.md';
@@ -496,14 +581,54 @@ $('#btnTerms').onclick = async () => {
       <input id="tDomain" placeholder="领域（可空）" style="max-width:130px">
       <button class="primary" onclick="addTerm()">添加</button>
       <button onclick="location.href='/api/terms/export'">导出 CSV</button>
+      ${task && task.sections && task.sections.length
+        ? '<button onclick="mineCandidates()">从当前论文挖候选</button>' : ''}
     </div>
     <div style="color:var(--muted);font-size:12px;margin-bottom:10px">
       人工术语优先级高于自动提取；译法不会被自动候选覆盖。
     </div>
+    <div id="candBox"></div>
     <table><thead><tr><th>原文</th><th>译法</th><th>领域</th><th>来源</th><th>语言</th><th></th></tr></thead>
     <tbody>${rows || '<tr><td colspan="6" style="color:var(--dim)">空</td></tr>'}</tbody></table>`;
   $('#mask').classList.add('show');
 };
+
+/* 从当前论文挖候选术语，勾选后入库——这是术语闭环的第 2 步 */
+async function mineCandidates(){
+  const box = $('#candBox');
+  if(!task || !task.sections) return;
+  const text = task.sections
+    .filter(s => ['abstract','introduction','method'].includes(s.kind))
+    .map(s => (s.paras||[]).map(p=>p.source).join('\n'))
+    .join('\n\n');
+  if(!text.trim()) return toast('当前论文还没解析出正文');
+  box.innerHTML = '<div style="color:var(--muted);font-size:12.5px;margin-bottom:8px">抽取中，约 15 秒…</div>';
+  const r = await api('/api/terms/candidates', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({text, limit:12})});
+  if(r.error){ box.innerHTML = `<div style="color:var(--bad);font-size:12.5px">${escapeHtml(r.error)}</div>`; return; }
+  const cands = r.candidates || [];
+  if(!cands.length){ box.innerHTML = '<div style="color:var(--muted);font-size:12.5px">没有挖到候选</div>'; return; }
+  box.innerHTML = `<div style="font-size:12.5px;color:var(--muted);margin-bottom:8px">
+      挖到 ${cands.length} 条，勾选后入库（已在库的不可选）</div>
+    <table><tbody>${cands.map((c,i)=>`<tr>
+      <td style="width:26px"><input type="checkbox" data-i="${i}" ${c.in_db?'disabled':''} ${c.in_db?'':'checked'}></td>
+      <td>${escapeHtml(c.source)}</td><td>${escapeHtml(c.target)}</td>
+      <td style="color:var(--muted);font-size:12px">${escapeHtml(c.reason||'')}</td>
+      <td>${c.in_db?'<span class="chip">已在库</span>':'<span class="chip ok">新候选</span>'}</td>
+    </tr>`).join('')}</tbody></table>
+    <div style="margin-top:10px"><button class="primary" onclick='acceptCands(${JSON.stringify(cands)})'>入库选中项</button></div>`;
+}
+
+async function acceptCands(cands){
+  const picked = [...document.querySelectorAll('#candBox input[type=checkbox]')]
+    .filter(cb => cb.checked && !cb.disabled)
+    .map(cb => cands[Number(cb.dataset.i)]);
+  if(!picked.length) return toast('没有选中任何候选');
+  const r = await api('/api/terms/accept', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({candidates: picked})});
+  toast(`入库 ${r.accepted || 0} 条`);
+  $('#btnTerms').click(); health();
+}
 
 async function addTerm(){
   const source = $('#tSrc').value.trim(), target = $('#tTgt').value.trim();
