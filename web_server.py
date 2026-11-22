@@ -164,6 +164,13 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "", backen
         sections = []
         for i, s in enumerate(paper.sections):
             media = _section_media(paper, i)
+            # 版面流：正文 / 表格 / 插图 / 公式按原位置混排；图片路径转成 URL
+            flow = []
+            for item in s.flow:
+                it = dict(item)
+                if it["type"] in ("figure", "formula") and it.get("path"):
+                    it["url"] = _media_url(it.pop("path"))
+                flow.append(it)
             sections.append(
                 {
                     "kind": s.kind,
@@ -183,6 +190,7 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "", backen
                         for p in (s.paras or [{"page": s.page, "text": s.text}])
                     ],
                     "tables": s.tables,
+                    "flow": flow,
                     "figures": media["figures"],
                     "page_images": media["page_images"],
                     "term_rate": None,

@@ -85,6 +85,9 @@ class Section:
     level: int = 2     # 标题层级，1=一级标题，2=二级，0=无标题（front matter）
     paras: list[dict] = field(default_factory=list)  # [{page, text}]，段落级对齐用
     tables: list[dict] = field(default_factory=list)  # [{page, rows: [[cell...]]}]
+    # 版面顺序的内容流：text / table / figure / formula 混排，用于把图表插回正文原位
+    # text 项只存 paras 下标（{"type":"text","para":0}），翻译结果按 paras 回填
+    flow: list[dict] = field(default_factory=list)
 
     @property
     def char_count(self) -> int:
@@ -508,118 +511,158 @@ def _title_hashes(text: str, level: int) -> str:
     return "##" if int(level or 2) <= 1 else "###"
 
 
-def _blocks_to_markdown(blocks: list[dict]) -> tuple[list[str], list[dict], list[dict]]:
-    """MinerU 块 → 每页 markdown（复用现有切章逻辑）+ 表格 + 图片。"""
-    pages: dict[int, list[str]] = {}
-    tables: list[dict] = []
-    figures: list[dict] = []
+def _sections_from_mineru(blocks: list[dict]) -> list[Section]:
+    """MinerU 块 → Section 列表，同时保留版面顺序的 flow。
+
+    和 md 路径的区别：这里不走"markdown → 正则切章"，而是直接按块建章节，
+    这样表格、插图、公式都能带着 bbox 留在原来的位置（flow），而不是堆到章节末尾。
+    """
+    sections: list[Section] = []
+    current = Section(kind="front", title="(front matter)", page=1, text="", level=0)
     in_refs = False
     in_abstract = False
+
+    def close() -> None:
+        nonlocal current
+        if current.paras or current.tables or current.flow:
+            sections.append(current)
+
+    def add_para(text: str, page: int, bbox: list) -> None:
+        current.paras.append({"page": page, "text": text, "bbox": bbox})
+        current.flow.append({"type": "text", "para": len(current.paras) - 1})
+        current.text += text + "\n"
 
     for b in blocks:
         pno = b["page"]
         btype = b["type"]
         text = (b.get("text") or "").strip()
+        bbox = b.get("bbox") or []
 
-        if btype in ("page_number", "page_footnote", "aside_text"):
-            continue  # 页码、脚注、页边文字：进正文只会污染
-
-        if btype == "table":
-            tables.append({"page": pno, "html": b.get("html") or "", "rows": _html_rows(b.get("html") or "")})
-            continue
-
-        if btype in ("image", "chart"):
-            figures.append({"page": pno, "bbox": b.get("bbox") or [], "caption": b.get("caption") or ""})
-            continue
-
-        if btype == "equation":
-            continue  # 公式单独存放，不送翻译（送进去容易被改写）
+        if btype in ("page_number", "page_footnote", "aside_text", "doc_title"):
+            continue  # 页码/脚注/页边文字/论文大标题都不进正文
 
         if btype == "ref_text":
             if not in_refs:
+                close()
+                current = Section(kind="references", title="References", page=pno, text="", level=2)
                 in_refs = True
-                pages.setdefault(pno, []).append("## References")
-            pages.setdefault(pno, []).append(text)
-            pages.setdefault(pno, []).append("")  # 每条参考文献独立成段
-            continue
-
-        if btype == "doc_title":
-            pages.setdefault(pno, []).append(f"# {text}")  # 论文大标题，切章时会被丢掉
+            if text:
+                add_para(text, pno, bbox)
             continue
 
         if btype == "paragraph_title":
-            pages.setdefault(pno, []).append(f"{_title_hashes(text, b.get('level') or 2)} {text}")
+            if _title_hashes(text, b.get("level") or 2) == "##":
+                close()
+                current = Section(
+                    kind=_classify(text) or "other", title=text, page=pno, text="", level=2
+                )
+            else:
+                add_para(text, pno, bbox)  # 子标题留在正文里，不切碎章节
             continue
 
         if btype == "text":
-            # MinerU 常把 Abstract 当普通正文（它没有编号，也不算标题），
-            # 这里补一个标题，否则摘要会被并进题名页，而摘要恰恰是最该翻的部分
+            # MinerU 常把 Abstract 当普通正文，这里补一个章节，否则摘要并进题名页
             if not in_abstract and re.match(r"^abstract\b[:.\s]", text, re.IGNORECASE):
                 in_abstract = True
-                pages.setdefault(pno, []).append("## Abstract")
+                close()
+                current = Section(kind="abstract", title="Abstract", page=pno, text="", level=2)
                 text = re.sub(r"^abstract\b[:.\s]*", "", text, flags=re.IGNORECASE).strip()
                 if not text:
                     continue
+            if text:
+                add_para(text, pno, bbox)
+            continue
 
-        pages.setdefault(pno, []).append(text)
-        pages.setdefault(pno, []).append("")  # MinerU 的每个 text 块本身就是一段
+        if btype == "table":
+            html = b.get("html") or ""
+            rows = _html_rows(html)
+            current.tables.append({"page": pno, "rows": rows, "html": html})
+            current.flow.append(
+                {"type": "table", "page": pno, "bbox": bbox, "html": html, "rows": rows}
+            )
+            continue
 
-    total = (max(pages) if pages else 0)
-    md_pages = ["\n".join(pages.get(i, [])) for i in range(1, total + 1)]
-    return md_pages, tables, figures
+        if btype in ("image", "chart"):
+            current.flow.append(
+                {"type": "figure", "page": pno, "bbox": bbox, "caption": b.get("caption") or ""}
+            )
+            continue
+
+        if btype == "equation":
+            # 公式只存 LaTeX 与位置，不送翻译（送进去容易被模型改写）
+            current.flow.append({"type": "formula", "page": pno, "bbox": bbox, "latex": text})
+            continue
+
+    close()
+
+    # 认不出名字的方法章（如 "3. Deep Residual Learning"）：紧接实验/结论时按 method 记
+    for i, s in enumerate(sections):
+        if s.kind == "other" and i + 1 < len(sections) and sections[i + 1].kind in (
+            "experiment",
+            "conclusion",
+        ):
+            s.kind = "method"
+    return sections
+
+
+def _crop_bbox(doc, base, page_no: int, bbox: list, name: str, dpi: int = 170,
+               min_w: float = 40, min_h: float = 24) -> str:
+    """按归一化 bbox 从原页裁一块图出来，返回路径；失败返回空串。"""
+    if not (1 <= page_no <= doc.page_count) or len(bbox) != 4:
+        return ""
+    page = doc[page_no - 1]
+    x0, y0, x1, y1 = bbox
+    rect = pymupdf.Rect(
+        x0 * page.rect.width, y0 * page.rect.height,
+        x1 * page.rect.width, y1 * page.rect.height,
+    )
+    if rect.width < min_w or rect.height < min_h:
+        return ""
+    fp = base / name
+    try:
+        page.get_pixmap(clip=rect, dpi=dpi).save(fp)
+        return str(fp)
+    except Exception:
+        return ""
 
 
 def parse_with_mineru(path: str) -> ParsedPaper:
-    """MinerU 解析：结构最准，但慢。"""
+    """MinerU 解析：结构最准，但慢（约 30s/篇）。"""
     data = _mineru_blocks(path)
-    md_pages, tables, figures = _blocks_to_markdown(data["blocks"])
-    sections = split_sections_md(md_pages)
-    raw = "\n".join("\n".join(t for _, t in _md_to_lines(md)) for md in md_pages)
-
+    sections = _sections_from_mineru(data["blocks"])
     paper = ParsedPaper(
         path=path,
-        page_count=data.get("pages") or len(md_pages),
+        page_count=data.get("pages") or 0,
         needs_ocr=False,
         sections=sections,
-        raw_text=raw,
+        raw_text="\n".join(s.text for s in sections),
         backend="mineru",
     )
 
-    # 表格按页挂到章节上
-    for t in tables:
-        for s in sections:
-            if s.page <= t["page"] <= _section_end_page(sections, s):
-                s.tables.append({"page": t["page"], "rows": t["rows"], "html": t["html"]})
-                break
-
-    # 图片：用 bbox 从原页裁出来，比整页截图精确得多
     doc = pymupdf.open(path)
     try:
         _attach_media(paper, doc, path)
         base = config.DATA_DIR / "media" / _pdf_digest(path)
-        for i, f in enumerate(figures):
-            pno = f["page"]
-            if not (1 <= pno <= doc.page_count) or len(f["bbox"]) != 4:
-                continue
-            page = doc[pno - 1]
-            x0, y0, x1, y1 = f["bbox"]
-            rect = pymupdf.Rect(
-                x0 * page.rect.width, y0 * page.rect.height,
-                x1 * page.rect.width, y1 * page.rect.height,
-            )
-            if rect.width < 40 or rect.height < 30:
-                continue
-            fp = base / f"mineru_p{pno}_{i}.png"
-            try:
-                page.get_pixmap(clip=rect, dpi=170).save(fp)
-                paper.figures.setdefault(pno, []).append(str(fp))
-                if f.get("caption"):
-                    paper.captions[str(fp)] = f["caption"]
-            except Exception:
-                continue
+        for s in sections:
+            for i, item in enumerate(s.flow):
+                if item["type"] == "figure":
+                    fp = _crop_bbox(doc, base, item["page"], item["bbox"], f"fig_p{item['page']}_{i}.png")
+                    if not fp:
+                        continue
+                    item["path"] = fp
+                    paper.figures.setdefault(item["page"], []).append(fp)
+                    if item.get("caption"):
+                        paper.captions[fp] = item["caption"]
+                elif item["type"] == "formula":
+                    # 公式单独裁一张小图：LaTeX 渲染依赖字体，直接显示原图最忠实
+                    fp = _crop_bbox(doc, base, item["page"], item["bbox"],
+                                    f"eq_p{item['page']}_{i}.png", dpi=220, min_w=20, min_h=8)
+                    if fp:
+                        item["path"] = fp
     finally:
         doc.close()
     return paper
+
 
 
 def _section_end_page(sections: list[Section], sec: Section) -> int:

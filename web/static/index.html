@@ -115,6 +115,17 @@
     justify-content:center; z-index:80; padding:30px}
   .zoom.show{display:flex}
   .zoom img{max-width:96vw; max-height:92vh; background:#fff; border-radius:6px}
+  /* 正文内嵌的插图与公式（MinerU 解析时按 bbox 裁出来） */
+  .inline-fig{margin:14px 0; background:#11151b; border:1px solid var(--line);
+    border-radius:8px; padding:8px; max-width:560px}
+  .inline-fig img{width:100%; border-radius:4px; display:block; cursor:zoom-in; background:#fff}
+  .inline-fig figcaption{font-size:11.5px; color:var(--muted); padding-top:6px; line-height:1.6}
+  .formula{margin:14px 0; padding:10px 12px; background:#11151b; border:1px solid var(--line);
+    border-radius:8px; display:flex; flex-direction:column; gap:6px}
+  .formula img{max-height:90px; width:auto; max-width:100%; align-self:flex-start;
+    background:#fff; border-radius:4px; cursor:zoom-in; padding:3px 6px}
+  .formula code{font-family:ui-monospace,Consolas,monospace; font-size:11.5px;
+    color:var(--muted); word-break:break-all; line-height:1.6}
   .empty{padding:60px 34px; color:var(--muted); text-align:center; line-height:2}
   .empty kbd{background:var(--panel-2); border:1px solid var(--line); border-radius:5px;
     padding:1px 6px; font-size:12px}
@@ -488,16 +499,16 @@ function renderRead(t, streaming){
               s.cache_hits ? ` · 缓存 ${s.cache_hits}` : ''}</span>`
           : ''}
       </div>`;
-    const body = paras.map(p => `
+    const paraBlock = (p) => `
       <div class="para">
         <div class="pno">第 <b>${p.page}</b> 页${p.cached ? '<span class="cached">缓存</span>' : ''}${
           p.aligned === false ? '<span style="color:var(--warn)"> · 未按段对齐</span>' : ''}</div>
         <div class="src">${escapeHtml(p.source)}</div>
         ${p.translation ? `<div class="dst">${escapeHtml(p.translation)}</div>` : ''}
-      </div>`).join('');
+      </div>`;
 
-    const tables = (s.tables || []).map(t => {
-      // MinerU 给的是带 rowspan/colspan 的 HTML，直接渲染比拍平的二维数组准
+    // MinerU 给的是带 rowspan/colspan 的 HTML，直接渲染比拍平的二维数组准
+    const tableBlock = (t) => {
       const inner = t.html
         ? t.html.replace(/<\/?table[^>]*>/gi, '').replace(/<tbody[^>]*>|<\/tbody>/gi, '')
         : (t.rows || []).map((r, ri) => `<tr>${
@@ -505,25 +516,47 @@ function renderRead(t, streaming){
           }</tr>`).join('');
       return `<div class="tblwrap"><table class="tbl">${inner}</table>
         <div class="pno">第 ${t.page} 页 · 表格（原文结构，未翻译）</div></div>`;
-    }).join('');
+    };
 
-    const figs = (s.figures || []).length ? `<div class="figs">${s.figures.map(f => `
-      <figure><img src="${f.url}" loading="lazy" onclick="zoomImg('${f.url}')">
-        <figcaption>第 ${f.page} 页 · ${escapeHtml(f.caption || '插图（点击放大）')}</figcaption></figure>`).join('')}</div>` : '';
+    const figureBlock = (f) => f.url ? `
+      <figure class="inline-fig">
+        <img src="${f.url}" loading="lazy" onclick="zoomImg('${f.url}')">
+        <figcaption>第 ${f.page} 页 · ${escapeHtml(f.caption || '插图（点击放大）')}</figcaption>
+      </figure>` : '';
 
+    const formulaBlock = (x) => `
+      <div class="formula">
+        ${x.url ? `<img src="${x.url}" loading="lazy" onclick="zoomImg('${x.url}')">` : ''}
+        <code>${escapeHtml(x.latex || '')}</code>
+        <div class="pno">第 ${x.page} 页 · 公式</div>
+      </div>`;
+
+    // 没有 flow 时的降级路径：段落 + 章节末尾的表格/插图
+    const tables = (s.tables || []).map(tableBlock).join('');
+    const figs = (s.figures || []).length
+      ? `<div class="figs">${s.figures.map(figureBlock).join('')}</div>` : '';
     const snaps = (s.page_images || []).length ? `
       <details class="pages"><summary>查看原文页（${s.page_images.length} 页，含矢量图表）</summary>
         ${s.page_images.map(p => `<img src="${p.url}" loading="lazy">
           <div class="pno">第 ${p.page} 页</div>`).join('')}
       </details>` : '';
 
-    const extras = (tables || figs)
-      ? `<div class="pno" style="margin-top:14px;border-top:1px solid var(--line);padding-top:10px">
-           本节表格与插图（按原文页标注，未翻译）</div>${tables}${figs}`
-      : '';
+    // 有 flow 就按版面顺序混排（表格/插图/公式回原位）；没有就退回"段落 + 末尾图表"
+    let body;
+    if((s.flow || []).length){
+      body = s.flow.map(it => {
+        if(it.type === 'text') return paraBlock(paras[it.para] || {page: s.page, source: '', translation: ''});
+        if(it.type === 'table') return tableBlock(it);
+        if(it.type === 'figure') return figureBlock(it);
+        if(it.type === 'formula') return formulaBlock(it);
+        return '';
+      }).join('');
+    }else{
+      body = paras.map(paraBlock).join('') + tables + figs;
+    }
 
     html += `<div class="card" id="sec-${i}">${head}<div class="card-b">${
-      body || '<div class="src" style="color:var(--dim)">（本段未翻译）</div>'}${extras}${snaps}</div></div>`;
+      body || '<div class="src" style="color:var(--dim)">（本段未翻译）</div>'}${snaps}</div></div>`;
   });
   center.innerHTML = html;
   center.scrollTop = keepY;
