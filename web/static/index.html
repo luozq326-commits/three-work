@@ -131,6 +131,11 @@
   /* KaTeX 渲染结果：可选中、可缩放，比图片清楚 */
   .eq-render{color:var(--text); font-size:1.05em; overflow-x:auto; padding:4px 0}
   .eq-render .katex{font-size:1.12em}
+  /* 图片翻译的结果：原文/译文并排 */
+  .imgtext{margin:0; padding:10px; background:#11151b; border:1px solid var(--line);
+    border-radius:7px; font-size:12.5px; line-height:1.8; white-space:pre-wrap;
+    word-break:break-word; max-height:340px; overflow:auto; color:var(--text);
+    font-family:inherit}
   .empty{padding:60px 34px; color:var(--muted); text-align:center; line-height:2}
   .empty kbd{background:var(--panel-2); border:1px solid var(--line); border-radius:5px;
     padding:1px 6px; font-size:12px}
@@ -213,7 +218,7 @@
     <div class="dd-menu" id="modelMenu"></div>
   </div>
   <button id="btnSearch" class="ghost">检索</button>
-  <button id="btnPhone" class="ghost">手机拍照</button>
+  <button id="btnImage" class="ghost">图片翻译</button>
   <button id="btnTerms" class="ghost">术语库</button>
   <button id="btnNotes" class="ghost">历史笔记</button>
   <button id="btnPick" class="primary">选择 PDF</button>
@@ -837,71 +842,70 @@ async function doSearch(){
       </div>`).join('');
 }
 
-/* ---------- 手机拍照通道 ---------- */
-$('#btnPhone').onclick = async () => {
-  const j = await api('/api/lan');
-  const url = j.url || '';
-  const isLocal = url.includes('127.0.0.1');
-  $('#modalTitle').textContent = '手机拍照';
-  $('#modalBody').innerHTML = isLocal
-    ? `<div style="color:var(--bad)">服务没开局域网访问。请用 <code>--lan</code> 参数重启：
-       <br><code style="display:inline-block;margin-top:8px;background:#1c2029;padding:6px 10px;border-radius:6px">
-       E:\\Python312\\python.exe web_server.py --lan</code></div>`
-    : `<div style="display:flex;gap:22px;align-items:flex-start;flex-wrap:wrap">
-         <div style="flex:0 0 auto">
-           <img src="/api/qr?text=${encodeURIComponent(url)}" style="width:190px;height:190px;border-radius:10px;background:#fff;padding:6px">
-         </div>
-         <div style="flex:1;min-width:240px;line-height:1.9">
-           <div style="font-size:13px;color:var(--muted);margin-bottom:6px">手机扫这个码</div>
-           <div style="font-size:15px;font-weight:600">${escapeHtml(url)}</div>
-           ${fwHtml(j)}
-           ${wifiHtml(j)}
-           <div style="color:var(--muted);font-size:12.5px;margin-top:10px">
-             手机和电脑要在同一个 WiFi 下。<br>
-             手机上拍照 → 识别英文 → 点翻译，全部在这台电脑上算，图片不出局域网。<br>
-             一页约 40~60 秒（OCR 比直接解析 PDF 慢，因为要先认字）。
-           </div>
-         </div>
-       </div>`;
+/* ---------- 图片翻译（本机选图 / 拖拽 / 粘贴） ---------- */
+$('#btnImage').onclick = () => {
+  $('#modalTitle').textContent = '图片翻译';
+  $('#modalBody').innerHTML = `
+    <div id="dropZone" style="border:1px dashed var(--line);border-radius:10px;padding:26px;
+      text-align:center;cursor:pointer;transition:border-color .15s">
+      <div style="font-size:14px">点击选择图片，或把图片拖到这里</div>
+      <div style="color:var(--dim);font-size:12.5px;margin-top:6px">也可以直接 Ctrl+V 粘贴截图</div>
+      <input id="imgFile" type="file" accept="image/*" hidden>
+    </div>
+    <div id="imgResult" style="margin-top:14px"></div>`;
   $('#mask').classList.add('show');
+
+  const zone = $('#dropZone'), input = $('#imgFile');
+  zone.onclick = () => input.click();
+  input.onchange = () => input.files[0] && translateImage(input.files[0]);
+  zone.ondragover = e => { e.preventDefault(); zone.style.borderColor = 'var(--accent)'; };
+  zone.ondragleave = () => { zone.style.borderColor = 'var(--line)'; };
+  zone.ondrop = e => {
+    e.preventDefault(); zone.style.borderColor = 'var(--line)';
+    const f = e.dataTransfer.files[0];
+    if(f) translateImage(f);
+  };
+  document.onpaste = e => {
+    const item = [...((e.clipboardData && e.clipboardData.items) || [])]
+      .find(i => i.type.startsWith('image/'));
+    if(item){
+      const f = item.getAsFile();
+      if(f) translateImage(f);
+    }
+  };
 };
 
-// 校园网/公共 WiFi 常开客户端隔离：防火墙放行了，手机照样 ERR_ADDRESS_UNREACHABLE
-function wifiHtml(j){
-  const w = j.wifi || {};
-  if(!w.ssid) return '';
-  const risky = /sdu|edu|校园|guest|访客|public|free|univ|student/i.test(w.ssid);
-  if(!risky) {
-    return `<div style="margin-top:6px;font-size:12.5px;color:var(--muted)">
-      当前 WiFi：<b style="color:var(--text)">${escapeHtml(w.ssid)}</b>${w.signal ? '（' + escapeHtml(w.signal) + '）' : ''}</div>`;
+async function translateImage(file){
+  const box = $('#imgResult');
+  if(!box) return;
+  box.innerHTML = `<div style="color:var(--muted);font-size:13px">正在识别文字并翻译…（约 10~30 秒）</div>`;
+  let j = null;
+  try{
+    const r = await fetch('/api/image/translate?name=' + encodeURIComponent(file.name || 'image.png'),
+      {method:'POST', body:file});
+    j = await r.json();
+  }catch(err){
+    box.innerHTML = `<div style="color:var(--bad)">请求失败：${escapeHtml(String(err))}</div>`;
+    return;
   }
-  return `<div style="margin-top:8px;padding:9px 11px;border:1px solid var(--warn);border-radius:7px;
-      font-size:12.5px;line-height:1.85;color:var(--warn)">
-      当前 WiFi：<b>${escapeHtml(w.ssid)}</b>${w.signal ? '（' + escapeHtml(w.signal) + '）' : ''}<br>
-      这类网络（校园网/公共 WiFi）通常开了<b>客户端隔离</b>，设备之间互相不可见，
-      手机即使连同一个 WiFi 也会报 ERR_ADDRESS_UNREACHABLE。<br>
-      <b>最稳的办法</b>：手机开热点 → 电脑连这个热点 → 关掉这个弹窗再点「手机拍照」重新扫码。
+  if(!j || (j.error && !j.text)){
+    box.innerHTML = `<div style="color:var(--bad)">${escapeHtml((j && j.error) || '处理失败')}</div>`;
+    return;
+  }
+  const warn = j.error ? `<div style="color:var(--warn);font-size:12.5px;margin-bottom:8px">${escapeHtml(j.error)}</div>` : '';
+  box.innerHTML = `
+    ${warn}
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+      <span style="color:var(--muted);font-size:12.5px">${j.chars||0} 字 · ${j.seconds||0} 秒</span>
+      <button onclick="copyText(document.getElementById('imgTgt').innerText)">复制译文</button>
+      <button onclick="copyText(document.getElementById('imgSrc').innerText)">复制原文</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div><div class="pno">原文</div><pre id="imgSrc" class="imgtext">${escapeHtml(j.text||'')}</pre></div>
+      <div><div class="pno">译文</div><pre id="imgTgt" class="imgtext">${escapeHtml(j.translation||'')}</pre></div>
     </div>`;
 }
 
-// 手机连不上九成是防火墙：WLAN 常被识别为「公用网络」，默认拦入站
-function fwHtml(j){
-  const fw = j.firewall || {};
-  if(fw.rule) {
-    return `<div style="margin-top:8px;font-size:12.5px;color:var(--ok)">
-      ✓ 防火墙已放行 ${fw.port} 端口</div>`;
-  }
-  return `<div style="margin-top:8px;padding:9px 11px;border:1px solid var(--warn);border-radius:7px;
-      font-size:12.5px;line-height:1.85;color:var(--warn)">
-      ⚠ 防火墙还没放行 ${fw.port} 端口${fw.profile ? `（当前网络：${fw.profile}）` : ''}，手机可能连不上。<br>
-      用<b>管理员</b>身份打开 PowerShell 执行：
-      <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
-        <code id="fwCmd" style="flex:1;background:#1c2029;padding:6px 8px;border-radius:5px;
-          font-size:11.5px;color:var(--text);word-break:break-all">${escapeHtml(j.fix_cmd||'')}</code>
-        <button onclick="copyText(document.getElementById('fwCmd').textContent)" style="padding:4px 9px">复制</button>
-      </div>
-    </div>`;
-}
 
 /* ---------- 术语库 ---------- */
 $('#btnTerms').onclick = async () => {
@@ -1006,8 +1010,12 @@ async function openNote(id){
     ${mdToHtml(n.note_md || '')}</div>`;
 }
 
-$('#modalClose').onclick = () => $('#mask').classList.remove('show');
-$('#mask').onclick = e => { if(e.target.id === 'mask') $('#mask').classList.remove('show'); };
+function closeModal(){
+  $('#mask').classList.remove('show');
+  document.onpaste = null;  // 关掉弹窗后不该再拦粘贴
+}
+$('#modalClose').onclick = closeModal;
+$('#mask').onclick = e => { if(e.target.id === 'mask') closeModal(); };
 
 /* ---------- 恢复上一次任务（刷新不丢结果） ---------- */
 async function restore(){

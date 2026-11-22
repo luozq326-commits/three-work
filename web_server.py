@@ -772,6 +772,70 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"deleted": n})
             return
 
+        # 图片翻译：上传一张图 → OCR → 翻译，一步到位（替代原来的手机拍照通道）
+        if path == "/api/image/translate":
+            name = (q.get("name") or ["image.png"])[0]
+            name = re.sub(r"[^\w.\-]", "_", os.path.basename(name)) or "image.png"
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0:
+                self._json({"error": "空文件"}, 400)
+                return
+            if length > MAX_UPLOAD:
+                self._json({"error": "图片超过 80MB"}, 400)
+                return
+            dest = os.path.join(UPLOADS, f"img_{int(time.time())}_{name}")
+            with open(dest, "wb") as f:
+                remaining = length
+                while remaining > 0:
+                    chunk = self.rfile.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    remaining -= len(chunk)
+
+            t0 = time.perf_counter()
+            try:
+                text = pdf_parse.ocr_image(dest)
+            except Exception as exc:
+                self._json({"error": f"OCR 失败：{exc}"}, 500)
+                return
+            if not text.strip():
+                self._json({"error": "这张图里没认出文字"}, 200)
+                return
+
+            # 按空行切段再翻译：整块送进去，模型容易漏译后半段
+            paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+            if not paras:
+                paras = [text.strip()]
+            try:
+                r = translate.translate_paragraphs(
+                    [{"page": 1, "text": p} for p in paras]
+                )
+            except Exception as exc:
+                self._json(
+                    {
+                        "error": f"翻译失败：{exc}",
+                        "text": text,
+                        "seconds": round(time.perf_counter() - t0, 1),
+                    },
+                    200,
+                )
+                return
+
+            self._json(
+                {
+                    "text": text,
+                    "translation": "\n\n".join(
+                        p.get("translation", "") for p in r["paras"]
+                    ),
+                    "paras": r["paras"],
+                    "chars": len(text),
+                    "seconds": round(time.perf_counter() - t0, 1),
+                    "term_rate": r.get("term_rate"),
+                }
+            )
+            return
+
         if path == "/api/mobile/ocr":
             name = (q.get("name") or ["photo.jpg"])[0]
             name = re.sub(r"[^\w.\-]", "_", os.path.basename(name)) or "photo.jpg"
