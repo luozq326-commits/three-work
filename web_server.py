@@ -168,7 +168,7 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "", backen
             flow = []
             for item in s.flow:
                 it = dict(item)
-                if it["type"] in ("figure", "formula") and it.get("path"):
+                if it["type"] in ("figure", "formula", "table") and it.get("path"):
                     it["url"] = _media_url(it.pop("path"))
                 flow.append(it)
             sections.append(

@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PaperReader · 端侧文献精读</title>
+<link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
+<script src="/static/vendor/katex/katex.min.js"></script>
 <style>
   :root{
     --bg:#0f1115; --panel:#171a21; --panel-2:#1c2029; --line:#262b36;
@@ -126,6 +128,9 @@
     background:#fff; border-radius:4px; cursor:zoom-in; padding:3px 6px}
   .formula code{font-family:ui-monospace,Consolas,monospace; font-size:11.5px;
     color:var(--muted); word-break:break-all; line-height:1.6}
+  /* KaTeX 渲染结果：可选中、可缩放，比图片清楚 */
+  .eq-render{color:var(--text); font-size:1.05em; overflow-x:auto; padding:4px 0}
+  .eq-render .katex{font-size:1.12em}
   .empty{padding:60px 34px; color:var(--muted); text-align:center; line-height:2}
   .empty kbd{background:var(--panel-2); border:1px solid var(--line); border-radius:5px;
     padding:1px 6px; font-size:12px}
@@ -262,6 +267,7 @@ let task = null, timer = null, currentFile = null;
 let RANGE = 'all';
 let PARSE = 'auto';
 let SETTINGS = null;
+let EQ_TEX = [];  // 当前渲染批次的公式 LaTeX，下标对应 .eq-render[data-eq]
 const RANGE_LABEL = {all:'全文', core:'摘要+方法+实验', abstract:'仅摘要'};
 const PARSE_LABEL = {auto:'快速', mineru:'精细'};
 
@@ -476,9 +482,9 @@ function renderRead(t, streaming){
   if(center.dataset.sig === sig) return;
   center.dataset.sig = sig;
   const keepY = center.scrollTop;
+  EQ_TEX = [];  // 每次重绘重置公式表，data-eq 下标才对得上
 
-  let html = `<div class="paper-title">${t.title || ''}</div>
-    <div class="paper-meta">${t.pages || '—'} 页 · 解析 ${t.backend || '—'} ·
+  let html = `<div class="paper-title">${t.title || ''}</div>    <div class="paper-meta">${t.pages || '—'} 页 · 解析 ${t.backend || '—'} ·
     ${t.sections.length} 章 · 段落 ${paraDone}/${paraAll} 已译</div>`;
   if(streaming){
     html += `<div class="warnbox" style="display:flex;align-items:center;gap:12px">
@@ -508,7 +514,14 @@ function renderRead(t, streaming){
       </div>`;
 
     // MinerU 给的是带 rowspan/colspan 的 HTML，直接渲染比拍平的二维数组准
+    // 快速档拿不到表格结构，只能按原页裁图显示
     const tableBlock = (t) => {
+      if(!t.html && !(t.rows || []).length){
+        return t.url ? `<div class="tblwrap"><img src="${t.url}" loading="lazy"
+          style="max-width:100%;background:#fff;border-radius:4px;cursor:zoom-in"
+          onclick="zoomImg('${t.url}')">
+          <div class="pno">第 ${t.page} 页 · 表格（原图，快速档不解析表格结构）</div></div>` : '';
+      }
       const inner = t.html
         ? t.html.replace(/<\/?table[^>]*>/gi, '').replace(/<tbody[^>]*>|<\/tbody>/gi, '')
         : (t.rows || []).map((r, ri) => `<tr>${
@@ -524,12 +537,17 @@ function renderRead(t, streaming){
         <figcaption>第 ${f.page} 页 · ${escapeHtml(f.caption || '插图（点击放大）')}</figcaption>
       </figure>` : '';
 
-    const formulaBlock = (x) => `
-      <div class="formula">
+    const formulaBlock = (x) => {
+      // 有 LaTeX 就用 KaTeX 渲染（可选中、可缩放），原图作为对照保留
+      let idx = -1;
+      if(x.latex){ EQ_TEX.push(x.latex); idx = EQ_TEX.length - 1; }
+      return `<div class="formula">
+        ${idx >= 0 ? `<div class="eq-render" data-eq="${idx}"></div>` : ''}
         ${x.url ? `<img src="${x.url}" loading="lazy" onclick="zoomImg('${x.url}')">` : ''}
-        <code>${escapeHtml(x.latex || '')}</code>
-        <div class="pno">第 ${x.page} 页 · 公式</div>
+        ${idx < 0 && x.latex ? `<code>${escapeHtml(x.latex)}</code>` : ''}
+        <div class="pno">第 ${x.page} 页 · 公式${idx >= 0 && x.url ? '（上为渲染，下为原图）' : ''}</div>
       </div>`;
+    };
 
     // 没有 flow 时的降级路径：段落 + 章节末尾的表格/插图
     const tables = (s.tables || []).map(tableBlock).join('');
@@ -560,6 +578,19 @@ function renderRead(t, streaming){
   });
   center.innerHTML = html;
   center.scrollTop = keepY;
+
+  // 公式渲染：KaTeX 本地包，失败就退回 LaTeX 源码（不至于白屏）
+  center.querySelectorAll('.eq-render').forEach(el => {
+    const tex = EQ_TEX[Number(el.dataset.eq)];
+    if(!tex) return;
+    if(window.katex){
+      try{ katex.render(tex, el, {displayMode:true, throwOnError:false, strict:false}); return; }
+      catch(e){ /* 落到下面的源码显示 */ }
+    }
+    const code = document.createElement('code');
+    code.textContent = tex;
+    el.replaceWith(code);
+  });
   // 支持 #sec-5 这类锚点：内容渲染完再滚，否则浏览器找不到节点
   // 延迟一拍是必要的：插图是懒加载，加载后高度变化会把滚动位置顶走
   if(location.hash){

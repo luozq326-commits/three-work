@@ -220,11 +220,17 @@ def _md_to_lines(md: str) -> list[tuple[int, str]]:
     return out
 
 
-def _md_pages(doc) -> list[str]:
-    """整篇转 markdown 后按页返回。一次转换比逐页转换快一个数量级。"""
+def _md_chunks(doc) -> list:
+    """整篇转 markdown，按页返回原始 chunk（含 page_boxes，带每个版面块的 class 与 bbox）。"""
     pymupdf4llm.use_layout(True)
     chunks = pymupdf4llm.to_markdown(doc, page_chunks=True)
-    pages = [c.get("text", "") if isinstance(c, dict) else str(c) for c in chunks]
+    return [c if isinstance(c, dict) else {"text": str(c)} for c in chunks]
+
+
+def _md_pages(doc) -> list[str]:
+    """整篇转 markdown 后按页返回。一次转换比逐页转换快一个数量级。"""
+    chunks = _md_chunks(doc)
+    pages = [c.get("text", "") for c in chunks]
     # 页数与文档对不上时，宁可当成一页，也不要错位
     return pages if len(pages) == doc.page_count else ["\n".join(pages)]
 
@@ -607,7 +613,7 @@ def _sections_from_mineru(blocks: list[dict]) -> list[Section]:
 
 def _crop_bbox(doc, base, page_no: int, bbox: list, name: str, dpi: int = 170,
                min_w: float = 40, min_h: float = 24) -> str:
-    """按归一化 bbox 从原页裁一块图出来，返回路径；失败返回空串。"""
+    """按归一化 bbox（0~1）从原页裁一块图出来，返回路径；失败返回空串。"""
     if not (1 <= page_no <= doc.page_count) or len(bbox) != 4:
         return ""
     page = doc[page_no - 1]
@@ -624,6 +630,145 @@ def _crop_bbox(doc, base, page_no: int, bbox: list, name: str, dpi: int = 170,
         return str(fp)
     except Exception:
         return ""
+
+
+def _crop_rect_abs(doc, base, page_no: int, bbox: list, name: str, dpi: int = 170,
+                   min_w: float = 40, min_h: float = 24) -> str:
+    """按绝对坐标（PDF 点）裁剪。pymupdf4llm 的 page_boxes 用的是绝对坐标。"""
+    if not (1 <= page_no <= doc.page_count) or len(bbox) != 4:
+        return ""
+    page = doc[page_no - 1]
+    rect = pymupdf.Rect(*bbox)
+    if rect.width < min_w or rect.height < min_h:
+        return ""
+    fp = base / name
+    try:
+        page.get_pixmap(clip=rect, dpi=dpi).save(fp)
+        return str(fp)
+    except Exception:
+        return ""
+
+
+# 快速档：pymupdf4llm 的版面块分类 → 我们的 flow 类型
+_TEXT_BOX_CLASSES = {"text", "title", "section-header", "list-item", "caption", "footnote"}
+_MEDIA_BOX_CLASSES = {"picture": "figure", "table": "table", "formula": "formula"}
+
+
+def _norm_text(s: str) -> str:
+    """归一化：只留小写字母数字，用于段落与版面块的前缀匹配。"""
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
+def _layout_flow(paper: ParsedPaper, doc, chunks: list, sections: list[Section]) -> None:
+    """快速档也把表格/插图/公式放回原位。
+
+    段落文字来自 markdown（质量好），位置来自 page_boxes（有 bbox）：
+    先用 page.get_textbox 反查每个 box 的文字，再按归一化前缀把 box 匹配回段落。
+    匹配不上就留空 bbox，排序时落到该页末尾——宁可位置不准，也不要错位。
+    """
+    base = config.DATA_DIR / "media" / _pdf_digest(paper.path)
+    base.mkdir(parents=True, exist_ok=True)
+
+    boxes_by_page: dict[int, list] = {}
+    texts_by_page: dict[int, list[str]] = {}
+    for i, c in enumerate(chunks, start=1):
+        boxes = c.get("page_boxes") or []
+        boxes_by_page[i] = boxes
+        page = doc[i - 1] if i <= doc.page_count else None
+        texts: list[str] = []
+        for b in boxes:
+            bb = b.get("bbox") or []
+            t = ""
+            if page is not None and len(bb) == 4 and b.get("class") in _TEXT_BOX_CLASSES:
+                try:
+                    t = _norm_text(page.get_textbox(pymupdf.Rect(bb)))[:120]
+                except Exception:
+                    t = ""
+            texts.append(t)
+        texts_by_page[i] = texts
+
+    # 1) 给每个段落找 bbox
+    for s in sections:
+        for p in s.paras:
+            pno = p.get("page") or s.page
+            target = _norm_text(p.get("text"))[:120]
+            if not target:
+                continue
+            best, score = None, 0.0
+            for b, cand in zip(boxes_by_page.get(pno) or [], texts_by_page.get(pno) or []):
+                if not cand:
+                    continue
+                n = 0
+                for x, y in zip(target, cand):
+                    if x != y:
+                        break
+                    n += 1
+                sc = n / max(len(target), 1)
+                if sc > score:
+                    best, score = b.get("bbox"), sc
+            if score >= 0.5:
+                p["bbox"] = best
+
+    # 2) 收集所有媒体块，按 (页, y) 归属到"起始位置在它之前的最后一个章节"
+    #    不能按页区间分配给每个章节：同一页上常有多个章节，会重复展示同一张图
+    media: list[dict] = []
+    for pno, boxes in boxes_by_page.items():
+        for b in boxes:
+            t = _MEDIA_BOX_CLASSES.get(b.get("class"))
+            bb = b.get("bbox") or []
+            if not t or len(bb) != 4:
+                continue
+            # 公式框又扁又窄，用更小的尺寸门槛和更高的 dpi，否则会被当成噪点丢掉
+            kw = (
+                {"dpi": 220, "min_w": 20, "min_h": 8}
+                if t == "formula"
+                else {}
+            )
+            fp = _crop_rect_abs(doc, base, pno, bb, f"{t}_p{pno}_{len(media)}.png", **kw)
+            if not fp:
+                continue  # 裁不出图（太小/越界）就不展示，避免空白占位
+            media.append({"type": t, "page": pno, "bbox": bb, "path": fp})
+
+    starts: list[tuple[tuple[int, float], int]] = []
+    for idx, s in enumerate(sections):
+        first_y = None
+        for p in s.paras:
+            bb = p.get("bbox") or []
+            if len(bb) == 4:
+                first_y = bb[1]
+                break
+        starts.append(((s.page, first_y if first_y is not None else 0.0), idx))
+
+    buckets: dict[int, list[dict]] = {i: [] for i in range(len(sections))}
+    for m in media:
+        pos = (m["page"], m["bbox"][1])
+        owner = None
+        for start, idx in starts:
+            if start <= pos:
+                owner = idx
+            else:
+                break
+        if owner is not None:
+            buckets[owner].append(m)
+
+    # 3) 每章按 (页, y, x) 排序
+    for idx, s in enumerate(sections):
+        items = [
+            {"type": "text", "para": i, "page": p.get("page"), "bbox": p.get("bbox") or []}
+            for i, p in enumerate(s.paras)
+        ]
+        items.extend(buckets[idx])
+
+        def _key(it: dict) -> tuple:
+            bb = it.get("bbox") or []
+            return (
+                it.get("page") or 0,
+                bb[1] if len(bb) == 4 else 1e9,
+                bb[0] if len(bb) == 4 else 0,
+            )
+
+        items.sort(key=_key)
+        s.flow = items
 
 
 def parse_with_mineru(path: str) -> ParsedPaper:
@@ -797,7 +942,10 @@ def parse_pdf(path: str, backend: str = "auto", ocr: bool = True) -> ParsedPaper
         use_layout = backend == "layout" or (backend == "auto" and _HAS_4LLM)
         if use_layout:
             try:
-                pages_md = _md_pages(doc)
+                chunks = _md_chunks(doc)
+                pages_md = [c.get("text", "") for c in chunks]
+                if len(pages_md) != doc.page_count:
+                    pages_md = ["\n".join(pages_md)]
                 sections = split_sections_md(pages_md)
                 raw = "\n".join(
                     "\n".join(t for _, t in _md_to_lines(md)) for md in pages_md
@@ -810,7 +958,13 @@ def parse_pdf(path: str, backend: str = "auto", ocr: bool = True) -> ParsedPaper
                     raw_text=raw,
                     backend="layout",
                 )
-                return _attach_media(paper, doc, path)
+                _attach_media(paper, doc, path)
+                # 图表回原位：拿不到位置不该让整篇失败，退回"图表堆章节末尾"
+                try:
+                    _layout_flow(paper, doc, chunks, sections)
+                except Exception:
+                    pass
+                return paper
             except Exception:
                 # 版面模型缺 ONNX 运行时等情况，回落到 blocks，不让整条链路挂掉
                 if backend == "layout":
