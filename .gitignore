@@ -15,3 +15,6 @@ data/glossary_export.csv
 
 # MinerU 模型（835MB，单个 onnx 591MB，超过 GitHub 100MB 限制）
 模型/
+
+# 本机配置（含 API Key，绝不入库；模板见 data/settings.example.json）
+data/settings.json

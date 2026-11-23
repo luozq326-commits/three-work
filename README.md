@@ -26,46 +26,57 @@
 
 ## 快速开始
 
+需要 Python 3.12（开发环境是 3.12.10）。
+
 ```bash
-# 1. 模型服务（模型路径按自己的改）
-export OLLAMA_MODELS="E:/模型"
-"/e/模型/Ollama/ollama.exe" serve
+git clone <仓库地址> && cd three
+python -m pip install -r requirements.txt
 
-# 2. 预热（把首次加载的几秒挪出演示现场）
-E:/Python312/python.exe warmup.py
+# 1) 配置模型：复制模板后填 Key，或在界面右上角「模型」里填
+cp data/settings.example.json data/settings.json
 
-# 3. 启动界面
-E:/Python312/python.exe web_server.py
-#    手机拍照通道需要局域网访问：
-#    E:/Python312/python.exe web_server.py --lan
+# 2) 本机模型（可选，不配云端才需要）
+ollama pull qwen2.5-coder:7b
+ollama pull nomic-embed-text
+ollama serve
+
+# 3) 启动
+python web_server.py            # 只本机访问
+python web_server.py --lan      # 允许局域网访问
 ```
 
 浏览器打开 http://127.0.0.1:8000 。
 
-依赖：Python 3.12、`pymupdf`(2.0)、`pymupdf4llm`、`rapidocr-onnxruntime`、`qrcode`。
-Ollama 模型：`qwen2.5-coder:7b`（主力）、`nomic-embed-text`（检索）。
+### 配置说明
+
+- `data/settings.json` 存本机配置（含 API Key），**已在 .gitignore 里，不入库**
+- 仓库里只有模板 `data/settings.example.json`，所有 Key 都是空的
+- 没有配置文件时默认走本机 Ollama，不会崩
+- 界面右上角「模型」可切换：本机 / DeepSeek / 豆包（火山方舟）/ 自定义 OpenAI 兼容
+- 用豆包要注意：默认会开「深度思考」，程序已自动关闭（`thinking: disabled`），否则翻译两句话能烧 5000 token
 
 ### 可选：MinerU 精细解析
 
 默认走 PyMuPDF（12 秒/篇）。要更准的版面、表格合并单元格、图片 bbox、公式 LaTeX，装 MinerU：
 
 ```bash
-E:/Python312/python.exe -m venv .venv-mineru
+python -m venv .venv-mineru
 .venv-mineru/Scripts/python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 .venv-mineru/Scripts/python.exe -m pip install "mineru[torch]"
 ```
 
 - 装在独立 venv：torch / transformers 5.x 与主环境冲突，不能共装
-- 模型 835MB，首次运行自动下载；用 `MINERU_HOME` 指到 E 盘（默认 `~/.mineru` 会占 C 盘）
+- 模型 835MB，首次运行自动下载；默认放在 `E:/模型/mineru`（可用 `PAPERREADER_MODELS` 改），
+  不要放仓库目录——单个 onnx 591MB，GitHub 会拒收
 - 推理走 DirectML，直接使用 NVIDIA 显卡，不需要 CUDA
 - 界面右上角「解析：快速 / 精细」切换；装了才显示可用
 
 ## 命令行用法
 
 ```bash
-E:/Python312/python.exe demo.py data/papers/resnet.pdf                  # 只翻摘要
-E:/Python312/python.exe demo.py data/papers/resnet.pdf --sections all   # 全文
-E:/Python312/python.exe eval.py                                         # 多篇评测，输出 out/eval.md
+python demo.py data/papers/resnet.pdf                  # 只翻摘要
+python demo.py data/papers/resnet.pdf --sections all   # 全文
+python eval.py                                         # 多篇评测，输出 out/eval.md
 ```
 
 ## 目录结构

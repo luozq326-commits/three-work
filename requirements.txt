@@ -1,0 +1,14 @@
+# 主环境依赖（Python 3.12）
+# 安装：python -m pip install -r requirements.txt
+pymupdf==2.0
+pymupdf4llm==2.0
+rapidocr-onnxruntime==1.4.4
+qrcode==8.2
+pillow==13.0.0
+onnxruntime==1.31.1
+numpy==2.5.4
+
+# 可选：MinerU 精细解析（单独 venv，与 torch 一起装，不要装进主环境）
+#   python -m venv .venv-mineru
+#   .venv-mineru/Scripts/python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   .venv-mineru/Scripts/python.exe -m pip install "mineru[torch]"
