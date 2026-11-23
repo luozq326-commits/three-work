@@ -965,7 +965,7 @@ def main() -> int:
     if args.lan:
         print(f"局域网：http://{_lan_ip()}:{args.port}")
     else:
-        print("（手机拍照通道需加 --lan 启动）")
+        print("（需局域网访问时加 --lan 启动）")
     _c = llm.current_label() if hasattr(llm, "current_label") else config.MAIN_MODEL
     print(f"模型：{_c}　术语库：{len(terms.all_terms())} 条")
     print("Ctrl+C 停止")
