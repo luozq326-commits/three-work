@@ -32,8 +32,8 @@
 git clone <仓库地址> && cd three
 python -m pip install -r requirements.txt
 
-# 1) 配置模型：复制模板后填 Key，或在界面右上角「模型」里填
-cp data/settings.example.json data/settings.json
+# 1) 配置模型：仓库自带 settings.json（含作者的 Key）；要用自己的就改成模板再填
+#    cp data/settings.example.json data/settings.json
 
 # 2) 本机模型（可选，不配云端才需要）
 ollama pull qwen2.5-coder:7b
@@ -49,8 +49,9 @@ python web_server.py --lan      # 允许局域网访问
 
 ### 配置说明
 
-- `data/settings.json` 存本机配置（含 API Key），**已在 .gitignore 里，不入库**
-- 仓库里只有模板 `data/settings.example.json`，所有 Key 都是空的
+- `data/settings.json` 存本机配置，**按作者要求随仓库提交，含 API Key**
+- 借用仓库前请注意：用的是作者自己的额度，别拿去做批量任务
+- 想用自己的 Key：复制 `data/settings.example.json` 覆盖，或在界面右上角「模型」里填
 - 没有配置文件时默认走本机 Ollama，不会崩
 - 界面右上角「模型」可切换：本机 / DeepSeek / 豆包（火山方舟）/ 自定义 OpenAI 兼容
 - 用豆包要注意：默认会开「深度思考」，程序已自动关闭（`thinking: disabled`），否则翻译两句话能烧 5000 token

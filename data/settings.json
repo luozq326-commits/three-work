@@ -1,0 +1,34 @@
+{
+ "active": "doubao",
+ "providers": {
+  "local": {
+   "label": "本机 Ollama",
+   "backend": "ollama",
+   "base_url": "http://127.0.0.1:11434",
+   "model": "qwen2.5-coder:7b",
+   "api_key": ""
+  },
+  "deepseek": {
+   "label": "DeepSeek",
+   "backend": "openai",
+   "base_url": "https://api.deepseek.com/v1",
+   "model": "deepseek-chat",
+   "api_key": ""
+  },
+  "doubao": {
+   "label": "豆包（火山方舟）",
+   "backend": "openai",
+   "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+   "model": "ep-m-20261122202717-fmfj9",
+   "api_key": "ark-87cf0205-b2b0-4adc-8e6b-bdf21aae4ba9-57d3f",
+   "disable_thinking": true
+  },
+  "custom": {
+   "label": "自定义 OpenAI 兼容",
+   "backend": "openai",
+   "base_url": "",
+   "model": "",
+   "api_key": ""
+  }
+ }
+}
