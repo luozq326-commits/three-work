@@ -302,6 +302,18 @@ def _classify(title: str) -> str | None:
     return None
 
 
+def _clean_inline_md(t: str) -> str:
+    """去掉段落里的行内 HTML 标记。
+
+    pymupdf4llm 会把脚注、上标转成 <sup>1</sup> 之类的标签，
+    直接送进翻译会在中文里漏出 "<sup>1</sup>"，读起来像乱码。
+    """
+    t = re.sub(r"<br\s*/?>", "\n", t, flags=re.IGNORECASE)
+    t = re.sub(r"<[^>]{1,20}>", "", t)
+    t = re.sub(r"[ \t]+", " ", t)
+    return t.strip()
+
+
 def split_sections_md(pages_md: list[str]) -> list[Section]:
     """用版面模型给出的标题层级切章节，同时攒出带页码的段落。
 
@@ -321,7 +333,7 @@ def split_sections_md(pages_md: list[str]) -> list[Section]:
     def flush_par() -> None:
         nonlocal buf
         if buf:
-            t = "\n".join(buf).strip()
+            t = _clean_inline_md("\n".join(buf).strip())
             if t:
                 current.paras.append({"page": buf_page, "text": t})
             buf = []
@@ -458,12 +470,14 @@ _OCR_ENGINE = None
 MINERU_VENV = config.ROOT / ".venv-mineru"
 MINERU_BRIDGE = config.ROOT / "tools" / "mineru_bridge.py"
 # 模型放 E 盘，别塞 C 盘用户目录（MinerU 默认 ~/.mineru，834MB）
-MINERU_HOME = str(config.ROOT.parent / "模型" / "mineru")
+# 也不能放仓库里：单个 onnx 591MB，GitHub 直接拒收
+MODEL_ROOT = os.environ.get("PAPERREADER_MODELS") or "E:/模型"
+MINERU_HOME = os.path.join(MODEL_ROOT, "mineru")
 MINERU_ENV = {
     "MINERU_MODEL_SOURCE": "modelscope",
     "MINERU_HOME": MINERU_HOME,
-    "MODELSCOPE_CACHE": str(config.ROOT.parent / "模型" / "mineru" / "hub"),
-    "HF_HOME": str(config.ROOT.parent / "模型" / "hf"),
+    "MODELSCOPE_CACHE": os.path.join(MINERU_HOME, "hub"),
+    "HF_HOME": os.path.join(MODEL_ROOT, "hf"),
 }
 
 

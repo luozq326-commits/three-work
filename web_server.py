@@ -931,9 +931,23 @@ def main() -> int:
     args = ap.parse_args()
     host = "0.0.0.0" if args.lan else args.host
 
-    if not llm.health():
+    # 模型连通性检查放后台跑：云端不通时（代理、断网）不该把启动卡住几十秒
+    probe = {"ok": None}
+
+    def _ping():
+        try:
+            probe["ok"] = llm.health()
+        except Exception:
+            probe["ok"] = False
+
+    th = threading.Thread(target=_ping, daemon=True)
+    th.start()
+    th.join(6)
+    if probe["ok"] is False:
         print(f"[警告] 模型服务 {config.BASE_URL} 没响应，界面能打开但跑不了任务")
-        print('       启动：export OLLAMA_MODELS="E:/模型" && "/e/模型/Ollama/ollama.exe" serve')
+        print('       本机：export OLLAMA_MODELS="E:/模型" && "/e/模型/Ollama/ollama.exe" serve')
+    elif probe["ok"] is None:
+        print("[提示] 模型连通性检查超时，界面照常启动（可能是代理或网络问题）")
 
     # 启动时给笔记建索引：没有索引的话跨文献检索是空的，用户会以为功能坏了
     def _index():
@@ -949,10 +963,11 @@ def main() -> int:
     srv = ThreadingHTTPServer((host, args.port), Handler)
     print(f"界面已启动：http://127.0.0.1:{args.port}")
     if args.lan:
-        print(f"手机拍照：http://{_lan_ip()}:{args.port}/mobile")
+        print(f"局域网：http://{_lan_ip()}:{args.port}")
     else:
         print("（手机拍照通道需加 --lan 启动）")
-    print(f"模型：{config.MAIN_MODEL}　术语库：{len(terms.all_terms())} 条")
+    _c = llm.current_label() if hasattr(llm, "current_label") else config.MAIN_MODEL
+    print(f"模型：{_c}　术语库：{len(terms.all_terms())} 条")
     print("Ctrl+C 停止")
     try:
         srv.serve_forever()

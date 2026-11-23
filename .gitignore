@@ -9,3 +9,9 @@ data/uploads/
 # MinerU 虚拟环境（1.4GB）与解析产物（每页快照 + 裁图），不入库
 .venv-mineru/
 data/media/
+
+# 术语库导出（运行时产物）
+data/glossary_export.csv
+
+# MinerU 模型（835MB，单个 onnx 591MB，超过 GitHub 100MB 限制）
+模型/

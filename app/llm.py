@@ -30,10 +30,21 @@ def _cfg() -> dict:
     }
 
 
+def current_label() -> str:
+    """给启动提示用的「提供方 · 模型」描述。"""
+    c = _cfg()
+    return f"{c['name']} · {c['model']}"
+
+
 def model_name() -> str:
     """当前模型标识，缓存键要用它，切模型后旧缓存自然失效。"""
     c = _cfg()
     return f"{c['name']}:{c['model']}"
+
+
+# 有些环境（公司网络、沙箱）会设 http_proxy 环境变量，urllib 会照单全收。
+# 代理常常不放行模型服务域名，表现就是"连不上"或卡几十秒。这里一律直连。
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def _post(url: str, payload: dict, timeout: int, api_key: str = "") -> dict:
@@ -43,7 +54,7 @@ def _post(url: str, payload: dict, timeout: int, api_key: str = "") -> dict:
         headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(url, data=body, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _OPENER.open(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = ""
@@ -63,13 +74,13 @@ def health() -> bool:
     c = _cfg()
     try:
         if c["backend"] == "ollama":
-            with urllib.request.urlopen(f"{c['base_url']}/api/tags", timeout=5) as r:
+            with _OPENER.open(f"{c['base_url']}/api/tags", timeout=5) as r:
                 return r.status == 200
         req = urllib.request.Request(
             f"{c['base_url']}/models",
             headers={"Authorization": f"Bearer {c['api_key']}"} if c["api_key"] else {},
         )
-        with urllib.request.urlopen(req, timeout=8) as r:
+        with _OPENER.open(req, timeout=8) as r:
             return r.status == 200
     except Exception:
         return False
