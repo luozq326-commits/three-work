@@ -23,6 +23,8 @@
   GET  /api/note/<id>          单条笔记
 """
 
+import base64
+import io
 import argparse
 import hashlib
 import json
@@ -1111,6 +1113,28 @@ class Handler(BaseHTTPRequestHandler):
                     f.write(chunk)
                     remaining -= len(chunk)
 
+            # 小图先放大再 OCR：手机截图、论文插图往往只有几百像素宽，
+            # 直接识别掉字严重；放大 1.5 倍后再认，准确率明显提升
+            thumb = ""
+            try:
+                from PIL import Image
+
+                img = Image.open(dest).convert("RGB")
+                w, h = img.size
+                if w < 900:
+                    scale = min(2.0, 1200 / max(w, 1))
+                    img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+                    up = dest.rsplit(".", 1)[0] + "_up.png"
+                    img.save(up, "PNG")
+                    dest = up
+                t = img.copy()
+                t.thumbnail((180, 180))
+                buf = io.BytesIO()
+                t.save(buf, "PNG")
+                thumb = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+            except Exception:
+                pass  # 预处理失败不影响主流程，原图照样能 OCR
+
             t0 = time.perf_counter()
             try:
                 text = pdf_parse.ocr_image(dest)
@@ -1165,6 +1189,7 @@ class Handler(BaseHTTPRequestHandler):
                     "chars": len(text),
                     "seconds": elapsed,
                     "term_rate": r.get("term_rate"),
+                    "thumb": thumb,
                 }
             )
             return
@@ -1191,6 +1216,28 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     f.write(chunk)
                     remaining -= len(chunk)
+            # 小图先放大再 OCR：手机截图、论文插图往往只有几百像素宽，
+            # 直接识别掉字严重；放大 1.5 倍后再认，准确率明显提升
+            thumb = ""
+            try:
+                from PIL import Image
+
+                img = Image.open(dest).convert("RGB")
+                w, h = img.size
+                if w < 900:
+                    scale = min(2.0, 1200 / max(w, 1))
+                    img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+                    up = dest.rsplit(".", 1)[0] + "_up.png"
+                    img.save(up, "PNG")
+                    dest = up
+                t = img.copy()
+                t.thumbnail((180, 180))
+                buf = io.BytesIO()
+                t.save(buf, "PNG")
+                thumb = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+            except Exception:
+                pass  # 预处理失败不影响主流程，原图照样能 OCR
+
             t0 = time.perf_counter()
             try:
                 text = pdf_parse.ocr_image(dest)
