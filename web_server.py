@@ -204,7 +204,7 @@ def _translate_remaining(tid: str) -> None:
             if not src:
                 continue
             try:
-                r = translate.translate_paragraphs(src)
+                r = translate.translate_paragraphs(src, should_stop=lambda: False)
                 with TASK_LOCK:
                     TASKS[tid]["sections"][idx]["paras"] = r["paras"]
                     TASKS[tid]["sections"][idx]["term_rate"] = r["term_rate"]
@@ -436,9 +436,10 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "", backen
             sec = sections[idx]
             src_section = paper.sections[idx]
             try:
-                r = translate.translate_paragraphs(src_section.paras or [
-                    {"page": src_section.page, "text": src_section.text}
-                ])
+                r = translate.translate_paragraphs(
+                    src_section.paras or [{"page": src_section.page, "text": src_section.text}],
+                    should_stop=cancelled,
+                )
                 sec["paras"] = r["paras"]
                 sec["term_rate"] = r["term_rate"]
                 sec["violations"] = r["violations"]
@@ -454,6 +455,15 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "", backen
                 sections=sections,
                 progress=0.05 + 0.6 * min(done_units / total_units, 1.0),
             )
+            if r.get("stopped"):
+                # 已译的部分留在 sections 里，点「继续翻译」只补没译的
+                _update(
+                    tid,
+                    sections=sections,
+                    status="cancelled",
+                    stage="已暂停（已译部分已保留）",
+                )
+                return
         timings["翻译"] = time.perf_counter() - t0
         _update(tid, timings=dict(timings), stage="要素抽取", stage_index=3, progress=0.7)
 

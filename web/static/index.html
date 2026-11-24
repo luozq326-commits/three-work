@@ -538,7 +538,7 @@ function renderRead(t, streaming){
     if(left > 0){
       html += `<div class="warnbox" style="display:flex;align-items:center;gap:12px">
         <span style="flex:1">还有 <b>${left}</b> 节正文没有翻译（当前只翻了部分章节）。</span>
-        <button onclick="retranslate()" style="padding:5px 12px">补译剩余 ${left} 节</button></div>`;
+        <button onclick="retranslate()" style="padding:5px 12px">继续翻译剩余 ${left} 节</button></div>`;
     }
   }
   t.sections.forEach((s, i) => {
@@ -667,7 +667,7 @@ function zoomImg(url){
 async function cancelTask(){
   if(!task) return;
   await api('/api/task/' + task.id + '/cancel', {method:'POST'});
-  toast('已请求停止，当前段落译完就停');
+  toast('已暂停，已译部分保留；点「继续翻译」接着跑');
 }
 
 async function retranslate(){
@@ -675,7 +675,7 @@ async function retranslate(){
   const r = await api('/api/retranslate', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({task_id: task.id})});
   if(r.error) return toast(r.error);
-  toast('开始补译剩余章节，译文有缓存，只花没翻过的部分');
+  toast('继续翻译，已完成的部分走缓存，只花没翻过的');
   if(!timer) timer = setInterval(poll, 1200);
   poll();
 }

@@ -155,6 +155,7 @@ def translate_paragraphs(
     domain: str | None = None,
     tgt_lng: str | None = None,
     max_retry: int = 1,
+    should_stop=None,
 ) -> dict:
     """按段落翻译，返回带页码的对照结果。
 
@@ -194,7 +195,13 @@ def translate_paragraphs(
     aligned_ok = 0
     aligned_total = 0
 
+    stopped = False
     for batch in _batch_paras(pending, config.CHUNK_CHARS):
+        # 每批之间检查一次：用户点暂停后最多再等一批（约十几秒），
+        # 而不是等整章跑完才停
+        if should_stop is not None and should_stop():
+            stopped = True
+            break
         joined = "\n\n".join(f"[{n}] {t}" for n, (_, t) in enumerate(batch, start=1))
         hits = terms.match_terms(joined, domain, tgt_lng)
         block = terms.constraint_block(hits)
@@ -245,12 +252,22 @@ def translate_paragraphs(
             rates.append(v["rate"])
             violations += len(v["violations"])
 
-    result_paras = [
-        p
-        if p is not None
-        else {"page": 0, "source": "", "translation": "", "aligned": True, "cached": False}
-        for p in out
-    ]
+    # 停下来的话，没轮到的段落保留原文、译文留空，界面显示"未译"
+    result_paras = []
+    for i, p in enumerate(out):
+        if p is not None:
+            result_paras.append(p)
+        else:
+            src = (paras[i].get("text") or "").strip() if i < len(paras) else ""
+            result_paras.append(
+                {
+                    "page": paras[i].get("page", 0) if i < len(paras) else 0,
+                    "source": src,
+                    "translation": "",
+                    "aligned": True,
+                    "cached": False,
+                }
+            )
     return {
         "paras": result_paras,
         "term_rate": round(sum(rates) / len(rates), 3) if rates else 1.0,
@@ -260,4 +277,5 @@ def translate_paragraphs(
         "tok_per_s": round(tokens / total_s, 1) if total_s else 0.0,
         "cache_hits": cache_hits,
         "aligned_rate": round(aligned_ok / aligned_total, 3) if aligned_total else 1.0,
+        "stopped": stopped,
     }
