@@ -67,7 +67,7 @@ def translate_chunk(
         result = terms.verify_translation(text, translated, domain, tgt_lng)
 
     if use_cache and translated.strip():
-        cache.put(key, text, translated, {"model": config.MAIN_MODEL, "retries": retries})
+        cache.put(key, text, translated, {"model": llm.model_name(), "retries": retries})
 
     return {
         "text": translated,
@@ -230,7 +230,7 @@ def translate_paragraphs(
                 }
                 aligned_ok += 1
                 aligned_total += 1
-                cache.put(cache.make_key(src), src, zh, {"model": config.MAIN_MODEL})
+                cache.put(cache.make_key(src), src, zh, {"model": llm.model_name()})
 
         total_s += time.perf_counter() - t0
         tokens += meta.get("eval_count", 0)

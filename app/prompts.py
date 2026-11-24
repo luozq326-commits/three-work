@@ -78,7 +78,7 @@ TERM_EXTRACT_SYSTEM = """你是学术翻译的术语管理员。从给定英文�
 不要挑：普通常用词（model、data、result、method、network）、人名、机构名、数据集编号、纯数字指标。
 
 只输出一个 JSON 对象，不要 markdown 围栏，不要解释：
-{{"terms": [{{"source": "英文原词，小写原形", "target": "建议中文译法", "reason": "为什么值得统一，不超过 20 字"}}]}}
+{{"terms": [{{"source": "英文原词，小写原形", "target": "建议中文译法", "domain": "所属学科或细分领域简短标签（如 cv/nlp/ml/climate/systems/bio 等，统一用英文小写或简短中文）", "reason": "为什么值得统一，不超过 20 字"}}]}}
 
 最多 {limit} 条，按对理解的重要性排序。"""
 
