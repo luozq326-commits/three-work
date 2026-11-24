@@ -864,8 +864,11 @@ class Handler(BaseHTTPRequestHandler):
                 SimpleNamespace(kind=s.get("kind", ""), text=s.get("text") or "")
                 for s in t.get("sections", [])
             ]
+            def _sum_progress(i, total):
+                _update(tid, stage=f"总结 {i}/{total} 节")
+
             try:
-                md = summarize.summarize(secs, t.get("title", ""))
+                md = summarize.summarize(secs, t.get("title", ""), progress=_sum_progress)
             except Exception as exc:
                 self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
                 return

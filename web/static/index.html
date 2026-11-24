@@ -779,13 +779,32 @@ function renderRight(t){
 async function genSummary(){
   if(!task) return toast('先处理一篇论文');
   const btn = $('#btnSum');
-  btn.disabled = true; btn.textContent = '总结中，约 20 秒…';
-  const r = await api('/api/summary', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({task_id: task.id})});
-  btn.disabled = false; btn.textContent = '重新生成总结';
-  if(r.error){ toast(r.error, 5000); return; }
+  btn.disabled = true; btn.textContent = '总结中…';
+  const view = $('#sumView');
+  if(view) view.innerHTML = '<span style="color:var(--muted);font-size:12.5px">正在生成八节拆解…</span>';
+
+  // 八节是并发生成的，轮询拿进度，让用户看到"3/8"而不是干等
+  let alive = true;
+  const tick = setInterval(async () => {
+    if(!alive || !task) return;
+    const t = await api('/api/task/' + task.id).catch(() => null);
+    if(t && t.stage && t.stage.startsWith('总结')){
+      btn.textContent = t.stage + '…';
+      if(view) view.innerHTML = `<span style="color:var(--muted);font-size:12.5px">${escapeHtml(t.stage)}，并行生成中…</span>`;
+    }
+  }, 2000);
+
+  let r = {};
+  try{
+    r = await api('/api/summary', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({task_id: task.id})});
+  }finally{
+    alive = false; clearInterval(tick);
+    btn.disabled = false; btn.textContent = '重新生成总结';
+  }
+  if(r.error){ toast(r.error, 5000); if(view) view.innerHTML = ''; return; }
   task.summary = r.summary;
-  $('#sumView').innerHTML = mdToHtml(r.summary);
+  if(view) view.innerHTML = mdToHtml(r.summary);
 }
 
 function previewNoteEdit(){
