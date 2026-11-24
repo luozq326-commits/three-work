@@ -12,7 +12,7 @@
 import sys
 import time
 
-from app import config, llm, terms, translate
+from app import config, llm, settings, terms, translate
 
 SAMPLE = (
     "Transformer models have become the dominant architecture for sequence modeling. "
@@ -29,18 +29,23 @@ SAMPLE = (
 def main() -> int:
     print("=" * 58)
     print("1) 检查模型服务")
+    cur = settings.current()
     if not llm.health():
-        print(f"   [失败] {config.BASE_URL} 无响应")
+        print(f"   [失败] {cur.get('base_url') or config.BASE_URL} 无响应")
         print("   先启动服务：\"E:\\模型\\Ollama\\ollama.exe\" serve")
         return 1
-    models = llm.list_models()
-    print(f"   [通过] 在线，可用模型 {len(models)} 个")
-    for m in models:
-        mark = "  <- 当前主力" if m == config.MAIN_MODEL else ""
-        print(f"        {m}{mark}")
-    if config.MAIN_MODEL not in models:
-        print(f"   [警告] 配置里的 {config.MAIN_MODEL} 不在列表中，请先 ollama pull")
-        return 1
+    if cur.get("backend") == "ollama":
+        models = llm.list_models()
+        print(f"   [通过] 在线，可用模型 {len(models)} 个")
+        want_model = cur.get("model") or config.MAIN_MODEL
+        for m in models:
+            mark = "  <- 当前主力" if m == want_model else ""
+            print(f"        {m}{mark}")
+        if want_model not in models:
+            print(f"   [警告] 配置里的 {want_model} 不在列表中，请先 ollama pull")
+            return 1
+    else:
+        print(f"   [通过] 云端服务在线：{llm.current_label()}")
 
     print("=" * 58)
     print("2) 初始化术语库")

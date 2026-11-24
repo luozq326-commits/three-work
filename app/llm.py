@@ -92,7 +92,7 @@ def list_models() -> list[str]:
     if c["backend"] != "ollama":
         return []
     try:
-        with urllib.request.urlopen(f"{c['base_url']}/api/tags", timeout=5) as r:
+        with _OPENER.open(f"{c['base_url']}/api/tags", timeout=5) as r:
             data = json.loads(r.read().decode("utf-8"))
         return sorted(m["name"] for m in data.get("models", []))
     except Exception:

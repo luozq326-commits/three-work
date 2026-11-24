@@ -84,9 +84,22 @@ def update(name: str, **kw) -> dict:
     data = load()
     if name not in data["providers"]:
         data["providers"][name] = dict(DEFAULTS["providers"]["custom"], label=name)
+    old_host = ""
+    old_base = (data["providers"][name].get("base_url") or "").strip()
+    if old_base:
+        from urllib.parse import urlparse
+
+        old_host = (urlparse(old_base).netloc or "").lower()
     for k in ("label", "backend", "base_url", "model", "api_key"):
         if kw.get(k) is not None:
             data["providers"][name][k] = str(kw[k]).strip()
+    new_base = (data["providers"][name].get("base_url") or "").strip()
+    if old_host and new_base and not kw.get("api_key"):
+        from urllib.parse import urlparse
+
+        new_host = (urlparse(new_base).netloc or "").lower()
+        if new_host and new_host != old_host:
+            data["providers"][name]["api_key"] = ""
     if kw.get("disable_thinking") is not None:
         data["providers"][name]["disable_thinking"] = bool(kw["disable_thinking"])
     save(data)
