@@ -1,5 +1,5 @@
 {
- "active": "deepseek",
+ "active": "doubao",
  "providers": {
   "local": {
    "label": "本机 Ollama",

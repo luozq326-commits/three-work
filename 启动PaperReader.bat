@@ -1,5 +1,6 @@
 @echo off
-setlocal
+chcp 65001 >nul
+setlocal enabledelayedexpansion
 cd /d "%~dp0"
 title PaperReader
 
@@ -7,33 +8,56 @@ set "PORT=8000"
 set "URL=http://127.0.0.1:%PORT%"
 
 echo ==================================================
-echo   PaperReader Ò»¼üÆô¶¯Æ÷
-echo   ¹¤×÷Ä¿Â¼: %CD%
+echo   PaperReader ä¸€é”®å¯åŠ¨
+echo   ç›®å½•: %CD%
 echo ==================================================
 
-where python >nul 2>nul
-if errorlevel 1 (
-    echo [´íÎó] Î´ÕÒµ½ python ÃüÁî£¬ÇëÈ·ÈÏÒÑ°²×° Python 3.12 ²¢¼ÓÈë PATH¡£
+REM ä¼˜å…ˆç”¨è£…äº†ä¾èµ–çš„ Python 3.12ã€‚
+REM æ³¨æ„ï¼šç³»ç»Ÿ PATH é‡Œå¯èƒ½å…ˆå‘½ä¸­åˆ«çš„ pythonï¼ˆæ¯”å¦‚å·¥å…·è‡ªå¸¦çš„ 3.13ï¼‰ï¼Œ
+REM é‚£ä¸ªæ²¡è£… pymupdf ç­‰ä¾èµ–ï¼Œç›´æ¥ç”¨ä¼šå¯åŠ¨å¤±è´¥ã€‚
+set "PY="
+if exist "E:\Python312\python.exe" set "PY=E:\Python312\python.exe"
+if not defined PY (
+    py -3 -c "import sys" >nul 2>nul && set "PY=py -3"
+)
+if not defined PY (
+    python -c "import sys" >nul 2>nul && set "PY=python"
+)
+if not defined PY (
+    echo [é”™è¯¯] æ²¡æ‰¾åˆ°å¯ç”¨çš„ Pythonï¼Œè¯·å…ˆå®‰è£… Python 3.12
     pause
     exit /b 1
 )
 
-python -c "import socket,sys; s=socket.socket(); r=s.connect_ex(('127.0.0.1', %PORT%)); s.close(); sys.exit(0 if r==0 else 1)"
+echo [ä¿¡æ¯] ä½¿ç”¨è§£é‡Šå™¨: !PY!
+
+REM ä¾èµ–è‡ªæ£€ï¼šç¼ºäº†å°±æ˜ç¡®å‘Šè¯‰ç”¨æˆ·è£…ä»€ä¹ˆï¼Œè€Œä¸æ˜¯å¯åŠ¨åˆ°ä¸€åŠæ‰æŠ¥é”™
+!PY! -c "import pymupdf, pymupdf4llm, rapidocr_onnxruntime" >nul 2>nul
+if errorlevel 1 (
+    echo [é”™è¯¯] å½“å‰ Python ç¼ºå°‘ä¾èµ–ï¼Œè¯·å…ˆæ‰§è¡Œï¼š
+    echo        !PY! -m pip install -r requirements.txt
+    pause
+    exit /b 1
+)
+
+REM ç«¯å£å·²è¢«å ç”¨ï¼šè¯´æ˜æœåŠ¡å·²ç»åœ¨è·‘ï¼Œç›´æ¥å¼€æµè§ˆå™¨
+!PY! -c "import socket,sys; s=socket.socket(); r=s.connect_ex(('127.0.0.1', %PORT%)); s.close(); sys.exit(0 if r==0 else 1)"
 if %errorlevel%==0 (
-    echo [ÌáÊ¾] ¼ì²âµ½ %URL% ÒÑÔÚÔËĞĞ£¬Ö±½ÓÎªÄú´ò¿ªä¯ÀÀÆ÷...
+    echo [æç¤º] æ£€æµ‹åˆ° %URL% å·²åœ¨è¿è¡Œï¼Œç›´æ¥æ‰“å¼€æµè§ˆå™¨...
     start "" "%URL%"
     timeout /t 2 /nobreak >nul
     exit /b 0
 )
 
-echo [Æô¶¯] ÕıÔÚÆô¶¯±¾µØ·şÎñ %URL% ...
-echo [ÌáÊ¾] ¹Ø±Õ±¾´°¿Ú»ò°´ Ctrl+C ¼´¿ÉÍ£Ö¹·şÎñ¡£
-echo [ÌáÊ¾] ÑİÊ¾Ç°Ê¹ÓÃ±¾»ú Ollama Ê±£¬¿ÉÏÈÔËĞĞÒ»´Î python warmup.py Ê¡µôÔ¼ 4 ÃëÄ£ĞÍ¼ÓÔØ¡£
+echo [ä¿¡æ¯] æ­£åœ¨å¯åŠ¨æœåŠ¡ï¼Œç¨åè‡ªåŠ¨æ‰“å¼€ %URL%
+echo [æç¤º] å…³é—­æœ¬çª—å£æˆ– Ctrl+C å³åœæ­¢æœåŠ¡
 echo.
 
-start "" /b python -c "import time,webbrowser; time.sleep(2); webbrowser.open('%URL%')"
+REM åå°ç­‰æœåŠ¡èµ·æ¥å†å¼€æµè§ˆå™¨ï¼Œé¿å…æ‰“å¼€å¤ªå¿«çœ‹åˆ°"æ— æ³•è®¿é—®"
+start "" /b cmd /c "timeout /t 4 /nobreak >nul & start """" ""%URL%"""
 
-python web_server.py --port %PORT%
+!PY! -u web_server.py --lan
+
 echo.
-echo [ÒÑÍË³ö] ·şÎñÒÑÍ£Ö¹¡£
+echo [ä¿¡æ¯] æœåŠ¡å·²åœæ­¢
 pause
