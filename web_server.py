@@ -54,8 +54,47 @@ MAX_UPLOAD = 80 * 1024 * 1024  # 80MB，够放一篇带图的论文
 TASKS: dict[str, dict] = {}
 TASK_LOCK = threading.Lock()
 LAST_TASK_ID: str | None = None  # 刷新页面后还能接回上一次的结果
-# 本地 8GB 显存扛不住并行推理，同一时间只跑一个任务，其余排队
-_RUN_SLOTS = threading.Semaphore(1)
+# 并发闸门：本机模型受 8GB 显存限制，同时只能跑一个；
+# 云端（豆包/DeepSeek）没有显存问题，允许 3 个并行，不必互相等。
+_RUN_COND = threading.Condition()
+_RUNNING = 0
+
+
+def _max_parallel() -> int:
+    try:
+        return 1 if llm._cfg()["backend"] == "ollama" else 3
+    except Exception:
+        return 1
+
+
+def _is_forced(tid: str | None) -> bool:
+    if not tid:
+        return False
+    with TASK_LOCK:
+        return bool(TASKS.get(tid, {}).get("force"))
+
+
+def _slot_acquire(tid: str | None = None) -> None:
+    """拿一个并发名额。满了就排队，并把状态回写给前端。
+
+    用户点「强制立即开始」会把任务标记成 force，这里直接放行（可能超限，
+    是用户主动要求的，优先级高于排队公平）。
+    """
+    global _RUNNING
+    with _RUN_COND:
+        if _RUNNING >= _max_parallel() and not _is_forced(tid):
+            if tid:
+                _update(tid, status="queued", stage="排队中", stage_index=0)
+            while _RUNNING >= _max_parallel() and not _is_forced(tid):
+                _RUN_COND.wait(timeout=1.0)
+        _RUNNING += 1
+
+
+def _slot_release() -> None:
+    global _RUNNING
+    with _RUN_COND:
+        _RUNNING = max(0, _RUNNING - 1)
+        _RUN_COND.notify_all()
 
 
 def _lan_ip() -> str:
@@ -174,9 +213,7 @@ def _translate_remaining(tid: str) -> None:
     为什么单独做：解析和翻译分开之后，用户可以先用"仅摘要"快速看，
     觉得值得再补译，不必从头重跑（译文有缓存，补译只花没翻过的那部分）。
     """
-    if not _RUN_SLOTS.acquire(blocking=False):
-        _update(tid, status="queued", stage="排队中")
-        _RUN_SLOTS.acquire()
+    _slot_acquire(tid)
     try:
         with TASK_LOCK:
             t = TASKS.get(tid)
@@ -216,7 +253,7 @@ def _translate_remaining(tid: str) -> None:
         _update(tid, status="done", stage="完成", progress=1.0)
         _persist_snapshot(tid)
     finally:
-        _RUN_SLOTS.release()
+        _slot_release()
 
 
 def _pdf_hash(pdf_path: str) -> str:
@@ -346,13 +383,16 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "", backen
 
     只允许一个任务同时跑（本地 8GB 显存扛不住并行），后来的排队等。
     """
-    if not _RUN_SLOTS.acquire(blocking=False):
-        _update(tid, status="queued", stage="排队中", stage_index=0)
-        _RUN_SLOTS.acquire()
-
     def cancelled() -> bool:
         with TASK_LOCK:
             return bool(TASKS.get(tid, {}).get("cancel"))
+
+    _slot_acquire(tid)
+    # 排队期间用户点了暂停/取消：不要排到队了再白跑一遍
+    if cancelled():
+        _update(tid, status="cancelled", stage="已取消")
+        _slot_release()
+        return
 
     try:
         timings: dict[str, float] = {}
@@ -519,7 +559,7 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "", backen
         _update(tid, status="error", error=f"{type(exc).__name__}: {exc}")
         traceback.print_exc()
     finally:
-        _RUN_SLOTS.release()
+        _slot_release()
 
 
 # ---------------------------------------------------------------- HTTP 层
@@ -678,6 +718,29 @@ class Handler(BaseHTTPRequestHandler):
             terms.export_csv(csv_path)
             self._file(csv_path)
             return
+        if path == "/api/tasks":
+            # 诊断用：卡在"排队中"时看这里，能分清是真在跑还是槽位泄漏
+            with TASK_LOCK:
+                rows = [
+                    {
+                        "id": k,
+                        "status": v.get("status"),
+                        "stage": v.get("stage"),
+                        "title": v.get("title"),
+                        "progress": v.get("progress"),
+                        "cancel": bool(v.get("cancel")),
+                    }
+                    for k, v in TASKS.items()
+                ]
+            self._json(
+                {
+                    "running": _RUNNING,
+                    "limit": _max_parallel(),
+                    "tasks": rows[-20:],
+                }
+            )
+            return
+
         if path == "/api/notes":
             self._json({"notes": note.list_notes()})
             return
@@ -813,6 +876,21 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             self._json({"summary": md})
+            return
+
+        # 强制插队：排队中的任务直接开始（用户嫌等太久时用）
+        m = re.match(r"^/api/task/([0-9a-zA-Z]+)/force$", path)
+        if m:
+            tid = m.group(1)
+            with TASK_LOCK:
+                t = TASKS.get(tid)
+                if not t:
+                    self._json({"error": "任务不存在"}, 404)
+                    return
+                t["force"] = True
+            with _RUN_COND:
+                _RUN_COND.notify_all()
+            self._json({"ok": True})
             return
 
         # 取消任务：worker 在章节之间检查这个标记

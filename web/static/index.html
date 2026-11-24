@@ -456,8 +456,13 @@ async function poll(){
   setBar(t.progress || 0);
   renderToc(t);
   if(t.status === 'queued'){
-    $('#center').innerHTML = `<div class="empty">前面还有任务在跑，已排队…<br>
-      <span style="font-size:12.5px">本地只有一块 8GB 显存，同时跑两个会互相拖慢</span></div>`;
+    // 云端模型没有显存限制，队列原因和本地不一样，别一律甩"8GB 显存"
+    const why = (t.backend === 'ollama' || !t.backend)
+      ? '本机只有一块 8GB 显存，同时跑两个会互相拖慢'
+      : '前面还有任务没结束（云端模型可并行 3 个）';
+    $('#center').innerHTML = `<div class="empty">已排队，前面还有任务在跑…<br>
+      <span style="font-size:12.5px">${why}</span><br>
+      <button onclick="forceStart()" style="margin-top:12px">强制立即开始</button></div>`;
   }else if(t.status === 'running'){
     // 还没解析出章节时给个占位；有了章节就完全交给 renderRead，
     // 两边都往 #center 写会互相覆盖，最后卡在占位上
@@ -662,6 +667,14 @@ function zoomImg(url){
   }
   document.getElementById('zoomImg').src = url;
   box.classList.add('show');
+}
+
+async function forceStart(){
+  if(!task) return;
+  const r = await api('/api/task/' + task.id + '/force', {method:'POST'});
+  if(r.error) return toast(r.error);
+  toast('已插队，马上开始');
+  poll();
 }
 
 async function cancelTask(){
