@@ -449,13 +449,14 @@ def _text_layer_ok(doc) -> bool:
 
 
 def ocr_available() -> bool:
-    """有没有可用的 OCR 引擎。RapidOCR 是纯 pip 依赖，不需要装 Tesseract。"""
-    try:
-        import rapidocr_onnxruntime  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
+    """有没有可用的 OCR 引擎。兼容 rapidocr_onnxruntime (1.x) 与 rapidocr (3.x)。"""
+    for mod in ("rapidocr_onnxruntime", "rapidocr"):
+        try:
+            __import__(mod)
+            return True
+        except ImportError:
+            continue
+    return False
 
 
 _OCR_ENGINE = None
@@ -489,7 +490,7 @@ def mineru_available() -> bool:
 def _mineru_blocks(pdf_path: str) -> dict:
     """调子进程跑 MinerU，返回 {pages, cost_s, blocks}。"""
     py = MINERU_VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    out = config.DATA_DIR / "media" / "_mineru" / f"{Path(pdf_path).stem}.json"
+    out = config.DATA_DIR / "media" / "_mineru" / f"{_pdf_digest(pdf_path)}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env.update(MINERU_ENV)
@@ -834,21 +835,122 @@ def _pdf_digest(pdf_path: str) -> str:
         return hashlib.md5(f.read(4 * 1024 * 1024)).hexdigest()[:12]
 
 
-def ocr_image(path: str, lang: str = "ch") -> str:
-    """对单张图片做 OCR，返回纯文本。手机拍照通道走这条路。
+def _format_ocr_items(items: list[tuple[float, float, float, float, str]]) -> str:
+    """把带 bbox 的 OCR 文本行重排为自然段落：自动检测双栏（先左栏后右栏）、合并段内断行与连字符。"""
+    if not items:
+        return ""
+    min_x = min(it[0] for it in items)
+    max_x = max(it[2] for it in items)
+    width = max(max_x - min_x, 1.0)
+    mid_x = (min_x + max_x) / 2.0
 
+    # 双栏判定：左右两栏各有 >=4 行，且跨过中线的长行占比很低
+    left_only = [it for it in items if it[2] <= mid_x + width * 0.04]
+    right_only = [it for it in items if it[0] >= mid_x - width * 0.04]
+    crossing = [
+        it for it in items if it[0] < mid_x - width * 0.04 and it[2] > mid_x + width * 0.04
+    ]
+    if len(left_only) >= 4 and len(right_only) >= 4 and len(crossing) <= max(2, len(items) // 8):
+        # 顶部跨栏标题归入最前，其余按左栏 -> 右栏排
+        top_y = min(min(it[1] for it in left_only), min(it[1] for it in right_only))
+        top_cross = sorted([it for it in crossing if it[1] <= top_y + 10], key=lambda x: (x[1], x[0]))
+        other_cross = [it for it in crossing if it[1] > top_y + 10]
+        columns = [
+            top_cross,
+            sorted(left_only, key=lambda x: (x[1], x[0])),
+            sorted(right_only + other_cross, key=lambda x: (x[1], x[0])),
+        ]
+    else:
+        columns = [sorted(items, key=lambda x: (x[1], x[0]))]
+
+    paras: list[str] = []
+    for col in columns:
+        if not col:
+            continue
+        heights = sorted(max(it[3] - it[1], 1.0) for it in col)
+        med_h = heights[len(heights) // 2]
+        col_left = min(it[0] for it in col)
+        cur = ""
+        prev: tuple[float, float, float, float, str] | None = None
+        for it in col:
+            x0, y0, x1, y1, txt = it
+            txt = txt.strip()
+            if not txt:
+                continue
+            if prev is None:
+                cur = txt
+                prev = it
+                continue
+            gap_y = y0 - prev[3]
+            is_heading = bool(re.match(r"^\d+(?:\.\d+)*\.?\s+\S", txt)) and len(txt) < 80
+            prev_heading = bool(re.match(r"^\d+(?:\.\d+)*\.?\s+\S", prev[4])) and len(prev[4]) < 80
+            indented = (x0 - col_left) > med_h * 0.9 and prev[4].rstrip().endswith((".", "?", "!", "。", "：", ":"))
+            if gap_y > med_h * 0.75 or is_heading or prev_heading or indented:
+                if cur:
+                    paras.append(cur)
+                cur = txt
+            else:
+                if cur.endswith("-") and len(cur) >= 2 and cur[-2].isalpha() and txt[0].isalpha():
+                    cur = cur[:-1] + txt
+                elif cur and ord(cur[-1]) > 127 and ord(txt[0]) > 127:
+                    cur += txt
+                else:
+                    cur += " " + txt
+            prev = it
+        if cur:
+            paras.append(cur)
+    return "\n\n".join(paras)
+
+
+def ocr_image(path: str, lang: str = "ch") -> str:
+    """对单张图片做 OCR，返回按阅读顺序分段后的纯文本。图片翻译与手机拍照通道走这条路。
+
+    兼容 rapidocr_onnxruntime (1.x) 与 rapidocr (3.x)，支持双栏重排与段内合并。
     引擎加载要几秒，进程内复用同一个实例，否则每次拍照都要等模型初始化。
     """
     global _OCR_ENGINE
-    from rapidocr_onnxruntime import RapidOCR
-
     if _OCR_ENGINE is None:
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+        except ImportError:
+            from rapidocr import RapidOCR
         _OCR_ENGINE = RapidOCR()
-    result, _ = _OCR_ENGINE(path)
+
+    out = _OCR_ENGINE(path)
+    items: list[tuple[float, float, float, float, str]] = []
+    # rapidocr 3.x 返回 RapidOCROutput 对象（含 .boxes 与 .txts）
+    txts = getattr(out, "txts", None)
+    boxes = getattr(out, "boxes", None)
+    if txts is not None:
+        if boxes is not None and len(boxes) == len(txts):
+            for box, txt in zip(boxes, txts):
+                s = str(txt).strip()
+                if not s:
+                    continue
+                xs = [float(pt[0]) for pt in box]
+                ys = [float(pt[1]) for pt in box]
+                items.append((min(xs), min(ys), max(xs), max(ys), s))
+            if items:
+                return _format_ocr_items(items)
+        return "\n".join(str(t).strip() for t in txts if str(t).strip())
+
+    # rapidocr_onnxruntime 1.x 返回 (result, elapse) 元组，result 每项：[框坐标, 文本, 置信度]
+    result = out[0] if isinstance(out, tuple) else out
     if not result:
         return ""
-    # result 每项：[框坐标, 文本, 置信度]
-    return "\n".join(item[1] for item in result if len(item) > 1 and item[1].strip())
+    for item in result:
+        if len(item) < 2 or not str(item[1]).strip():
+            continue
+        box, s = item[0], str(item[1]).strip()
+        try:
+            xs = [float(pt[0]) for pt in box]
+            ys = [float(pt[1]) for pt in box]
+            items.append((min(xs), min(ys), max(xs), max(ys), s))
+        except Exception:
+            continue
+    if items:
+        return _format_ocr_items(items)
+    return "\n".join(item[1] for item in result if len(item) > 1 and str(item[1]).strip())
 
 
 def _fill_paras_fallback(sections: list[Section]) -> None:

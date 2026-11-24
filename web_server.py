@@ -214,21 +214,109 @@ def _translate_remaining(tid: str) -> None:
                     TASKS[tid]["sections"][idx]["error"] = f"{type(exc).__name__}: {exc}"
             _update(tid, progress=round(n / len(todo), 3))
         _update(tid, status="done", stage="完成", progress=1.0)
+        _persist_snapshot(tid)
     finally:
         _RUN_SLOTS.release()
+
+
+def _pdf_hash(pdf_path: str) -> str:
+    """按文件内容算稳定哈希，用于跨次打开复用同一篇论文的快照。"""
+    try:
+        with open(pdf_path, "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
+def _persist_snapshot(tid: str) -> None:
+    """把已完成的任务快照写进 SQLite，供后续再次打开或历史笔记秒开。"""
+    with TASK_LOCK:
+        t = TASKS.get(tid)
+        if not t or not t.get("sections"):
+            return
+        snap = json.loads(json.dumps(t))
+    pdf_hash = snap.get("pdf_hash") or _pdf_hash(snap.get("pdf") or "")
+    if not pdf_hash:
+        return
+    try:
+        note.save_snapshot(
+            pdf_hash,
+            snap.get("note_id"),
+            snap,
+            model=llm.model_name(),
+            terms_ver=cache.terms_version(),
+        )
+    except Exception:
+        pass
+
+
+def _task_from_snapshot(snap: dict) -> str:
+    """把历史快照装入进程内存任务表，返回新 task_id（前端秒开三栏）。"""
+    global LAST_TASK_ID
+    tid = uuid.uuid4().hex[:12]
+    # 读一次笔记表，确保正文与批注是用户最新编辑过的版本
+    note_md = snap.get("note_md") or ""
+    if snap.get("note_id"):
+        row = note.load(int(snap["note_id"]))
+        if row and row.get("note_md") is not None:
+            note_md = row["note_md"]
+    cur_terms = cache.terms_version()
+    cur_model = llm.model_name()
+    snap_terms = snap.get("snapshot_terms_ver") or ""
+    snap_model = snap.get("snapshot_model") or ""
+    stale = bool(
+        (snap_terms and snap_terms != cur_terms) or (snap_model and snap_model != cur_model)
+    )
+    with TASK_LOCK:
+        LAST_TASK_ID = tid
+        TASKS[tid] = {
+            "id": tid,
+            "pdf": snap.get("pdf") or "",
+            "pdf_hash": snap.get("pdf_hash") or "",
+            "title": snap.get("title") or "历史论文",
+            "pages": snap.get("pages") or 0,
+            "backend": snap.get("backend") or "",
+            "ocr_used": bool(snap.get("ocr_used")),
+            "status": "done",
+            "stage": "已恢复历史记录",
+            "stage_index": 4,
+            "stage_total": 4,
+            "progress": 1.0,
+            "sections": snap.get("sections") or [],
+            "elements": snap.get("elements"),
+            "summary": snap.get("summary") or "",
+            "note_md": note_md,
+            "note_id": snap.get("note_id"),
+            "timings": snap.get("timings") or {},
+            "error": "",
+            "started": datetime.now().strftime("%H:%M:%S"),
+            "from_snapshot": True,
+            "snapshot_stale": stale,
+            "snapshot_updated_at": snap.get("snapshot_updated_at") or "",
+        }
+    return tid
 
 
 def _new_task(pdf_path: str, kinds: list[str]) -> str:
     global LAST_TASK_ID
     tid = uuid.uuid4().hex[:12]
-    LAST_TASK_ID = tid
     # 上传时为了防重名加了时间戳前缀，展示时要还原成人能读的论文名
     base = re.sub(r"^[0-9a-f]{10,}_", "", os.path.basename(pdf_path))
     title = os.path.splitext(base)[0]
+    p_hash = _pdf_hash(pdf_path)
     with TASK_LOCK:
+        LAST_TASK_ID = tid
+        done_ids = [
+            k
+            for k, v in TASKS.items()
+            if v.get("status") in ("done", "error", "cancelled")
+        ]
+        while len(done_ids) >= 20:
+            TASKS.pop(done_ids.pop(0), None)
         TASKS[tid] = {
             "id": tid,
             "pdf": pdf_path,
+            "pdf_hash": p_hash,
             "title": title,
             "status": "running",
             "stage": "解析",
@@ -401,6 +489,10 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "", backen
             el,
             term_rate=sum(rates) / len(rates) if rates else 1.0,
         )
+        try:
+            search.index_note(nid, title or os.path.basename(pdf_path), md)
+        except Exception:
+            pass
         timings["笔记"] = time.perf_counter() - t0
 
         _update(
@@ -412,6 +504,7 @@ def _run_task(tid: str, pdf_path: str, kinds: list[str], title: str = "", backen
             progress=1.0,
             stage="完成",
         )
+        _persist_snapshot(tid)
     except Exception as exc:
         _update(tid, status="error", error=f"{type(exc).__name__}: {exc}")
         traceback.print_exc()
@@ -454,14 +547,28 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _body(self) -> dict:
-        length = int(self.headers.get("Content-Length") or 0)
-        if not length:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return {}
+        if length <= 0 or length > 2 * 1024 * 1024:
             return {}
         raw = self.rfile.read(length)
         try:
             return json.loads(raw.decode("utf-8"))
         except Exception:
             return {}
+
+    def _same_origin(self) -> bool:
+        """校验 Origin / Referer 与 Host 一致，防止外部网页跨站调用本地接口。"""
+        host = (self.headers.get("Host") or "").strip().lower()
+        for hdr in ("Origin", "Referer"):
+            val = (self.headers.get(hdr) or "").strip()
+            if val:
+                netloc = (urlparse(val).netloc or "").lower()
+                if netloc and host and netloc != host:
+                    return False
+        return True
 
     # ---------- 路由 ----------
 
@@ -520,14 +627,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/search":
             query = (q.get("q") or [""])[0]
-            top_k = int((q.get("k") or ["5"])[0])
+            try:
+                top_k = max(1, min(int((q.get("k") or ["5"])[0]), 50))
+            except ValueError:
+                top_k = 5
             self._json(search.search(query, top_k=top_k))
             return
         if path.startswith("/media/"):
             rel = path[len("/media/"):]
-            base = os.path.join(config.DATA_DIR, "media")
-            candidate = os.path.normpath(os.path.join(base, rel))
-            if candidate.startswith(base) and os.path.isfile(candidate):
+            base = os.path.abspath(os.path.join(config.DATA_DIR, "media"))
+            candidate = os.path.abspath(os.path.join(base, rel))
+            if (candidate == base or candidate.startswith(base + os.sep)) and os.path.isfile(candidate):
                 self._file(candidate)
                 return
             self._json({"error": "not found"}, 404)
@@ -561,6 +671,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/notes":
             self._json({"notes": note.list_notes()})
             return
+        if path == "/api/image/history":
+            self._json({"items": note.list_image_history()})
+            return
+        m = re.match(r"^/api/image/history/(\d+)$", path)
+        if m:
+            row = note.load_image_history(int(m.group(1)))
+            self._json(row or {"error": "not found"}, 200 if row else 404)
+            return
         # 导出笔记：走服务端下载，比前端 blob + a.click() 稳（后者在部分 Chrome 配置下会弹"另存为"且存成空文件）
         m = re.match(r"^/api/note/(\d+)/export$", path)
         if m:
@@ -587,7 +705,11 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
         if path.startswith("/api/note/"):
-            nid = int(path.rsplit("/", 1)[-1])
+            try:
+                nid = int(path.rsplit("/", 1)[-1])
+            except ValueError:
+                self._json({"error": "invalid id"}, 400)
+                return
             row = note.load(nid)
             self._json(row or {"error": "not found"}, 200 if row else 404)
             return
@@ -608,8 +730,9 @@ class Handler(BaseHTTPRequestHandler):
         rel = path.lstrip("/")
         if rel.startswith("static/"):
             rel = rel[len("static/"):]
-        candidate = os.path.normpath(os.path.join(STATIC, rel))
-        if candidate.startswith(STATIC) and os.path.isfile(candidate):
+        static_base = os.path.abspath(STATIC)
+        candidate = os.path.abspath(os.path.join(static_base, rel))
+        if (candidate == static_base or candidate.startswith(static_base + os.sep)) and os.path.isfile(candidate):
             self._file(candidate)
             return
         self._json({"error": "not found"}, 404)
@@ -619,10 +742,24 @@ class Handler(BaseHTTPRequestHandler):
         path = u.path
         q = parse_qs(u.query)
 
+        if not self._same_origin():
+            self._json({"error": "forbidden origin"}, 403)
+            return
+        if path not in ("/api/upload", "/api/image/translate", "/api/mobile/ocr"):
+            ctype = (self.headers.get("Content-Type") or "").lower()
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if length > 0 and "application/json" not in ctype:
+                self._json({"error": "Content-Type 须为 application/json"}, 415)
+                return
+
         if path == "/api/settings":
             data = self._body()
             if data.get("name"):
-                settings.update(data["name"], **data)
+                payload = {k: v for k, v in data.items() if k != "name"}
+                settings.update(data["name"], **payload)
             if data.get("active"):
                 settings.set_active(data["active"])
             self._json(settings.public_view())
@@ -660,6 +797,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
                 return
             _update(tid, summary=md)
+            if t.get("note_id"):
+                try:
+                    note.update_snapshot_fields(int(t["note_id"]), summary=md)
+                except Exception:
+                    pass
             self._json({"summary": md})
             return
 
@@ -689,7 +831,64 @@ class Handler(BaseHTTPRequestHandler):
                 note_md=data.get("note_md"),
                 user_note=data.get("user_note"),
             )
+            if ok:
+                # 同步刷新进程内任务的 note_md，避免刷新页面或 restore() 覆盖回旧版
+                if data.get("note_md") is not None:
+                    with TASK_LOCK:
+                        for t in TASKS.values():
+                            if t.get("note_id") == nid:
+                                t["note_md"] = data["note_md"]
+                    try:
+                        note.update_snapshot_fields(nid, note_md=data["note_md"])
+                    except Exception:
+                        pass
+                row = note.load(nid)
+                if row:
+                    try:
+                        search.index_note(nid, row.get("title") or "", row.get("note_md") or "", force=True)
+                    except Exception:
+                        pass
             self._json({"ok": ok})
+            return
+
+        # 从历史笔记秒开完整三栏精读界面（复用 paper_snapshot）
+        m = re.match(r"^/api/note/(\d+)/open$", path)
+        if m:
+            nid = int(m.group(1))
+            snap = note.load_snapshot_by_note(nid)
+            if not snap:
+                self._json({"error": "这条旧笔记没有保存完整阅读快照（升级前生成的记录仅含笔记）"}, 404)
+                return
+            tid = _task_from_snapshot(snap)
+            self._json({"task_id": tid, "from_snapshot": True})
+            return
+
+        # 删除单条历史笔记（联动清理快照与检索索引）
+        m = re.match(r"^/api/note/(\d+)/delete$", path)
+        if m:
+            nid = int(m.group(1))
+            ok = note.delete_note(nid)
+            self._json({"ok": ok})
+            return
+
+        # 批量清理历史笔记（mode: "old"=仅无快照旧记录, "all"=清空全部）
+        if path == "/api/notes/clear":
+            data = self._body()
+            only_old = (data.get("mode") or "old") != "all"
+            deleted = note.clear_notes(only_without_snapshot=only_old)
+            self._json({"deleted": deleted})
+            return
+
+        # 删除单条图片翻译历史
+        m = re.match(r"^/api/image/history/(\d+)/delete$", path)
+        if m:
+            ok = note.delete_image_history(int(m.group(1)))
+            self._json({"ok": ok})
+            return
+
+        # 清空图片翻译历史
+        if path == "/api/image/history/clear":
+            self._json({"deleted": note.clear_image_history()})
             return
 
         if path == "/api/cache/clear":
@@ -701,14 +900,17 @@ class Handler(BaseHTTPRequestHandler):
             name = re.sub(r"[^\w\u4e00-\u9fa5.\-]", "_", os.path.basename(name))
             if not name.lower().endswith(".pdf"):
                 name += ".pdf"
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
             if length <= 0:
                 self._json({"error": "空文件"}, 400)
                 return
             if length > MAX_UPLOAD:
                 self._json({"error": "文件超过 80MB"}, 400)
                 return
-            dest = os.path.join(UPLOADS, f"{int(time.time())}_{name}")
+            dest = os.path.join(UPLOADS, f"{uuid.uuid4().hex[:8]}_{name}")
             with open(dest, "wb") as f:
                 remaining = length
                 while remaining > 0:
@@ -719,7 +921,12 @@ class Handler(BaseHTTPRequestHandler):
                     remaining -= len(chunk)
             # 同一篇论文重复上传不该堆副本：按内容哈希命名，内容相同就复用
             with open(dest, "rb") as f:
-                digest = hashlib.md5(f.read()).hexdigest()[:10]
+                raw_bytes = f.read()
+            if not raw_bytes.startswith(b"%PDF-"):
+                os.remove(dest)
+                self._json({"error": "不是有效的 PDF 文件"}, 400)
+                return
+            digest = hashlib.md5(raw_bytes).hexdigest()[:10]
             final = os.path.join(UPLOADS, f"{digest}_{name}")
             if os.path.exists(final):
                 os.remove(dest)
@@ -731,18 +938,35 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/run":
             data = self._body()
             pdf_path = data.get("path", "")
-            abs_path = os.path.normpath(os.path.join(ROOT, pdf_path))
-            if not os.path.isfile(abs_path) or not abs_path.lower().endswith(".pdf"):
+            allowed_dirs = (
+                os.path.abspath(UPLOADS) + os.sep,
+                os.path.abspath(os.path.join(ROOT, "data", "papers")) + os.sep,
+            )
+            abs_path = os.path.abspath(os.path.join(ROOT, pdf_path))
+            if (
+                not abs_path.startswith(allowed_dirs)
+                or not os.path.isfile(abs_path)
+                or not abs_path.lower().endswith(".pdf")
+            ):
                 self._json({"error": "PDF 路径无效"}, 400)
                 return
             kinds = data.get("kinds") or ["*"]
             backend = (data.get("backend") or "").strip()
+            force = bool(data.get("force"))
+            if not force:
+                snap = note.load_snapshot_by_hash(_pdf_hash(abs_path))
+                if snap:
+                    # 更新为当前有效路径，便于后续按需点「重新解析翻译」
+                    snap["pdf"] = abs_path
+                    tid = _task_from_snapshot(snap)
+                    self._json({"task_id": tid, "from_snapshot": True})
+                    return
             tid = _new_task(abs_path, kinds)
             title = TASKS[tid]["title"]
             threading.Thread(
                 target=_run_task, args=(tid, abs_path, kinds, title, backend), daemon=True
             ).start()
-            self._json({"task_id": tid})
+            self._json({"task_id": tid, "from_snapshot": False})
             return
 
         if path == "/api/terms":
@@ -776,14 +1000,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/image/translate":
             name = (q.get("name") or ["image.png"])[0]
             name = re.sub(r"[^\w.\-]", "_", os.path.basename(name)) or "image.png"
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
             if length <= 0:
                 self._json({"error": "空文件"}, 400)
                 return
             if length > MAX_UPLOAD:
                 self._json({"error": "图片超过 80MB"}, 400)
                 return
-            dest = os.path.join(UPLOADS, f"img_{int(time.time())}_{name}")
+            dest = os.path.join(UPLOADS, f"img_{uuid.uuid4().hex[:8]}_{name}")
             with open(dest, "wb") as f:
                 remaining = length
                 while remaining > 0:
@@ -799,18 +1026,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._json({"error": f"OCR 失败：{exc}"}, 500)
                 return
+            finally:
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
             if not text.strip():
                 self._json({"error": "这张图里没认出文字"}, 200)
                 return
 
-            # 按空行切段再翻译：整块送进去，模型容易漏译后半段
-            paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-            if not paras:
-                paras = [text.strip()]
+            # 走 translate_text 分块翻译（而非编号逐段模式），避免 OCR 文本换行导致 [1] 编号截断漏译
             try:
-                r = translate.translate_paragraphs(
-                    [{"page": 1, "text": p} for p in paras]
-                )
+                r = translate.translate_text(text)
             except Exception as exc:
                 self._json(
                     {
@@ -822,15 +1049,30 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
 
+            elapsed = round(time.perf_counter() - t0, 1)
+            tr_text = r.get("full_text", "")
+            hist_id = None
+            try:
+                hist_id = note.save_image_history(
+                    name=name,
+                    src_text=text,
+                    dst_text=tr_text,
+                    chars=len(text),
+                    term_rate=r.get("term_rate"),
+                    seconds=elapsed,
+                )
+            except Exception:
+                pass
+
             self._json(
                 {
+                    "id": hist_id,
+                    "name": name,
                     "text": text,
-                    "translation": "\n\n".join(
-                        p.get("translation", "") for p in r["paras"]
-                    ),
-                    "paras": r["paras"],
+                    "translation": tr_text,
+                    "chunks": len(r.get("chunks") or []),
                     "chars": len(text),
-                    "seconds": round(time.perf_counter() - t0, 1),
+                    "seconds": elapsed,
                     "term_rate": r.get("term_rate"),
                 }
             )
@@ -839,14 +1081,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/mobile/ocr":
             name = (q.get("name") or ["photo.jpg"])[0]
             name = re.sub(r"[^\w.\-]", "_", os.path.basename(name)) or "photo.jpg"
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
             if length <= 0:
                 self._json({"error": "空文件"}, 400)
                 return
             if length > MAX_UPLOAD:
                 self._json({"error": "图片过大"}, 400)
                 return
-            dest = os.path.join(UPLOADS, f"shot_{int(time.time())}_{name}")
+            dest = os.path.join(UPLOADS, f"shot_{uuid.uuid4().hex[:8]}_{name}")
             with open(dest, "wb") as f:
                 remaining = length
                 while remaining > 0:
@@ -861,6 +1106,11 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._json({"error": f"OCR 失败：{exc}"}, 500)
                 return
+            finally:
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
             self._json(
                 {
                     "text": text,

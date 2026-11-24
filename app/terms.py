@@ -294,6 +294,7 @@ def extract_candidates(text: str, limit: int = 15, domain: str | None = None) ->
             {
                 "source": src,
                 "target": tgt,
+                "domain": (item.get("domain") or domain or "general").strip() or "general",
                 "reason": (item.get("reason") or "").strip(),
                 "in_db": src.lower() in known,
             }
@@ -307,7 +308,8 @@ def accept_candidates(candidates: list[dict], domain: str = "general") -> int:
     for c in candidates:
         if c.get("in_db"):
             continue
-        add_term(c["source"], c["target"], domain=domain, origin="auto")
+        item_domain = (c.get("domain") or domain or "general").strip() or "general"
+        add_term(c["source"], c["target"], domain=item_domain, origin="auto")
         n += 1
     return n
 

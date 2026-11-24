@@ -25,6 +25,29 @@ CREATE TABLE IF NOT EXISTS note (
     created_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_note_path ON note(paper_path);
+CREATE TABLE IF NOT EXISTS paper_snapshot (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    pdf_hash    TEXT NOT NULL UNIQUE,
+    note_id     INTEGER,
+    pdf_path    TEXT DEFAULT '',
+    title       TEXT DEFAULT '',
+    backend     TEXT DEFAULT '',
+    model       TEXT DEFAULT '',
+    terms_ver   TEXT DEFAULT '',
+    data        TEXT NOT NULL,
+    updated_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_snap_note ON paper_snapshot(note_id);
+CREATE TABLE IF NOT EXISTS image_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT DEFAULT '',
+    src_text    TEXT NOT NULL,
+    dst_text    TEXT NOT NULL,
+    chars       INTEGER DEFAULT 0,
+    term_rate   REAL DEFAULT 1.0,
+    seconds     REAL DEFAULT 0.0,
+    created_at  TEXT
+);
 """
 
 SECTIONS = (
@@ -185,13 +208,133 @@ def save(
 
 
 def list_notes(paper_path: str | None = None) -> list[dict]:
-    sql = "SELECT id, paper_path, title, term_rate, created_at FROM note"
+    sql = """SELECT n.id, n.paper_path, n.title, n.term_rate, n.created_at,
+                    CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END AS has_snapshot
+             FROM note n
+             LEFT JOIN paper_snapshot s ON s.note_id = n.id"""
     args: tuple = ()
     if paper_path:
-        sql += " WHERE paper_path = ?"
+        sql += " WHERE n.paper_path = ?"
         args = (paper_path,)
     with _conn() as conn:
-        return [dict(r) for r in conn.execute(sql + " ORDER BY id DESC", args).fetchall()]
+        rows = [dict(r) for r in conn.execute(sql + " ORDER BY n.id DESC", args).fetchall()]
+        for r in rows:
+            r["has_snapshot"] = bool(r.get("has_snapshot"))
+        return rows
+
+
+def save_snapshot(
+    pdf_hash: str,
+    note_id: int | None,
+    task_data: dict,
+    model: str = "",
+    terms_ver: str = "",
+) -> None:
+    """持久化单篇论文的完整精读快照（解析章节+译文+要素+总结+笔记），用于秒开复用。"""
+    if not pdf_hash:
+        return
+    keep = {
+        "pdf": task_data.get("pdf", ""),
+        "title": task_data.get("title", ""),
+        "pages": task_data.get("pages", 0),
+        "backend": task_data.get("backend", ""),
+        "ocr_used": bool(task_data.get("ocr_used")),
+        "sections": task_data.get("sections") or [],
+        "elements": task_data.get("elements"),
+        "summary": task_data.get("summary") or "",
+        "note_md": task_data.get("note_md") or "",
+        "note_id": note_id,
+        "timings": task_data.get("timings") or {},
+    }
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _conn() as conn:
+        conn.execute(
+            """INSERT INTO paper_snapshot
+               (pdf_hash, note_id, pdf_path, title, backend, model, terms_ver, data, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(pdf_hash) DO UPDATE SET
+                 note_id=COALESCE(excluded.note_id, paper_snapshot.note_id),
+                 pdf_path=excluded.pdf_path,
+                 title=excluded.title,
+                 backend=excluded.backend,
+                 model=excluded.model,
+                 terms_ver=excluded.terms_ver,
+                 data=excluded.data,
+                 updated_at=excluded.updated_at""",
+            (
+                pdf_hash,
+                note_id,
+                keep["pdf"],
+                keep["title"],
+                keep["backend"],
+                model,
+                terms_ver,
+                json.dumps(keep, ensure_ascii=False),
+                now,
+            ),
+        )
+
+
+def _row_to_snapshot(row) -> dict | None:
+    if not row:
+        return None
+    try:
+        payload = json.loads(row["data"])
+    except Exception:
+        return None
+    payload["pdf_hash"] = row["pdf_hash"]
+    payload["snapshot_model"] = row["model"] or ""
+    payload["snapshot_terms_ver"] = row["terms_ver"] or ""
+    payload["snapshot_updated_at"] = row["updated_at"] or ""
+    if row["note_id"]:
+        payload["note_id"] = row["note_id"]
+    return payload
+
+
+def load_snapshot_by_hash(pdf_hash: str) -> dict | None:
+    if not pdf_hash:
+        return None
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM paper_snapshot WHERE pdf_hash = ?", (pdf_hash,)
+        ).fetchone()
+        return _row_to_snapshot(row)
+
+
+def load_snapshot_by_note(note_id: int) -> dict | None:
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM paper_snapshot WHERE note_id = ? ORDER BY updated_at DESC LIMIT 1",
+            (note_id,),
+        ).fetchone()
+        return _row_to_snapshot(row)
+
+
+def update_snapshot_fields(note_id: int, note_md: str | None = None, summary: str | None = None) -> None:
+    """笔记正文或 AI 总结更新时，同步写回对应快照。"""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT id, data FROM paper_snapshot WHERE note_id = ? ORDER BY updated_at DESC LIMIT 1",
+            (note_id,),
+        ).fetchone()
+        if not row:
+            return
+        try:
+            payload = json.loads(row["data"])
+        except Exception:
+            return
+        if note_md is not None:
+            payload["note_md"] = note_md
+        if summary is not None:
+            payload["summary"] = summary
+        conn.execute(
+            "UPDATE paper_snapshot SET data = ?, updated_at = ? WHERE id = ?",
+            (
+                json.dumps(payload, ensure_ascii=False),
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                row["id"],
+            ),
+        )
 
 
 def load(note_id: int) -> dict | None:
@@ -215,6 +358,102 @@ def update(note_id: int, note_md: str | None = None, user_note: str | None = Non
     with _conn() as conn:
         cur = conn.execute(f"UPDATE note SET {', '.join(sets)} WHERE id = ?", args)
         return cur.rowcount > 0
+
+
+def delete_note(note_id: int) -> bool:
+    """删除单条历史笔记，并联动清理其阅读快照与检索分块。"""
+    with _conn() as conn:
+        cur = conn.execute("DELETE FROM note WHERE id = ?", (note_id,))
+        conn.execute("DELETE FROM paper_snapshot WHERE note_id = ?", (note_id,))
+        try:
+            conn.execute("DELETE FROM note_chunk WHERE note_id = ?", (note_id,))
+        except sqlite3.Error:
+            pass
+        return cur.rowcount > 0
+
+
+def clear_notes(only_without_snapshot: bool = False) -> int:
+    """批量清理历史笔记。only_without_snapshot=True 时仅清掉无阅读快照的旧记录。"""
+    with _conn() as conn:
+        if only_without_snapshot:
+            ids = [
+                r["id"]
+                for r in conn.execute(
+                    """SELECT n.id FROM note n
+                       LEFT JOIN paper_snapshot s ON s.note_id = n.id
+                       WHERE s.id IS NULL"""
+                ).fetchall()
+            ]
+            if not ids:
+                return 0
+            ph = ",".join("?" for _ in ids)
+            cur = conn.execute(f"DELETE FROM note WHERE id IN ({ph})", ids)
+            try:
+                conn.execute(f"DELETE FROM note_chunk WHERE note_id IN ({ph})", ids)
+            except sqlite3.Error:
+                pass
+            return cur.rowcount
+        cur = conn.execute("DELETE FROM note")
+        conn.execute("DELETE FROM paper_snapshot")
+        try:
+            conn.execute("DELETE FROM note_chunk")
+        except sqlite3.Error:
+            pass
+        return cur.rowcount
+
+
+def save_image_history(
+    name: str,
+    src_text: str,
+    dst_text: str,
+    chars: int = 0,
+    term_rate: float = 1.0,
+    seconds: float = 0.0,
+) -> int:
+    """保存一条图片翻译历史记录，返回 id。"""
+    with _conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO image_history (name, src_text, dst_text, chars, term_rate, seconds, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                name or "image.png",
+                src_text,
+                dst_text,
+                chars or len(src_text),
+                term_rate if term_rate is not None else 1.0,
+                seconds or 0.0,
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            ),
+        )
+        return cur.lastrowid
+
+
+def list_image_history(limit: int = 50) -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT id, name, substr(src_text, 1, 80) AS preview, chars, term_rate, seconds, created_at
+               FROM image_history ORDER BY id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def load_image_history(item_id: int) -> dict | None:
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM image_history WHERE id = ?", (item_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def delete_image_history(item_id: int) -> bool:
+    with _conn() as conn:
+        cur = conn.execute("DELETE FROM image_history WHERE id = ?", (item_id,))
+        return cur.rowcount > 0
+
+
+def clear_image_history() -> int:
+    with _conn() as conn:
+        cur = conn.execute("DELETE FROM image_history")
+        return cur.rowcount
 
 
 def export_markdown(note_id: int, path: str) -> str:
