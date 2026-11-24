@@ -1,5 +1,5 @@
 {
- "active": "doubao",
+ "active": "deepseek",
  "providers": {
   "local": {
    "label": "本机 Ollama",
@@ -13,7 +13,7 @@
    "backend": "openai",
    "base_url": "https://api.deepseek.com/v1",
    "model": "deepseek-chat",
-   "api_key": ""
+   "api_key": "sk-1b9170a6836a4b568c930099db1724ab"
   },
   "doubao": {
    "label": "豆包（火山方舟）",
