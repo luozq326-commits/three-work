@@ -936,7 +936,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "task_id": tid})
             return
 
-        # 就当前论文提问：右下角对话框用
+        # 右下角对话框：通用助手，论文 / 总结 / 要素只作参考资料，不限制能问什么
         if path == "/api/chat":
             data = self._body()
             q = (data.get("question") or "").strip()
@@ -946,39 +946,56 @@ class Handler(BaseHTTPRequestHandler):
             if not q:
                 self._json({"error": "问题不能为空"}, 400)
                 return
-            with TASK_LOCK:
-                t = json.loads(json.dumps(TASKS.get(tid) or {}))
-            if not t:
-                self._json({"error": "先打开一篇论文再提问"}, 400)
-                return
 
-            secs = [
-                SimpleNamespace(kind=s.get("kind", ""), text=s.get("text") or "")
-                for s in (t.get("sections") or [])
-            ]
-            ctx = summarize.build_context(secs, 6000) if secs else ""
-            if not ctx.strip():
-                self._json({"error": "这篇论文还没有解析出正文"}, 400)
-                return
+            with TASK_LOCK:
+                t = json.loads(json.dumps(TASKS.get(tid) or {})) if tid else {}
 
             sys_prompt = (
-                "你在帮用户精读一篇英文学术论文。只依据下面的论文正文回答，"
-                "正文没写的一律说「论文里没写」，不要用常识补充，也不要编造数字。\n"
-                "回答要求：中文、简洁、分点；引用原文时用「（第 N 页）」标出页码；"
-                "如果问题超出论文范围，直接说明并给出论文里最接近的相关内容。"
+                "你是用户的 AI 助手，擅长学术与技术问题。用户正在精读一篇论文，"
+                "下面给你这篇论文的正文节选、AI 总结和结构化要素作为参考资料。\n"
+                "回答原则：\n"
+                "1. 用户问什么就答什么，不要因为「论文里没写」就拒绝回答。"
+                "通用的方法、原理、背景知识、写作建议、代码实现，都可以正常回答。\n"
+                "2. 涉及这篇论文的具体内容时，以参考资料为准；资料里没有的细节，"
+                "明确说「论文里没写」，再给出你自己的判断或常识性补充，并标明这是补充。\n"
+                "3. 引用论文原文时用「（第 N 页）」标页码。\n"
+                "4. 中文回答，结构清晰，该分点就分点，不要空话。"
             )
-            parts = [f"论文标题：{t.get('title') or '未知'}", "", "论文正文节选：", ctx]
+
+            parts = []
+            if t:
+                parts.append(f"论文标题：{t.get('title') or '未知'}")
+                secs = [
+                    SimpleNamespace(kind=x.get("kind", ""), text=x.get("text") or "")
+                    for x in (t.get("sections") or [])
+                ]
+                ctx = summarize.build_context(secs, 5000) if secs else ""
+                if ctx.strip():
+                    parts += ["", "【论文正文节选】", ctx]
+                if t.get("summary"):
+                    parts += ["", "【已生成的八节深度拆解】", str(t["summary"])[:4500]]
+                els = t.get("elements") or t.get("fields")
+                if els:
+                    try:
+                        compact = json.dumps(els, ensure_ascii=False)[:2500]
+                        parts += ["", "【结构化要素（问题/方法/数据/指标/局限）】", compact]
+                    except Exception:
+                        pass
             if quotes:
-                parts += ["", "用户选中的原文片段（回答时优先参考）："]
-                parts += [f"- {s}" for s in quotes[:6]]
+                parts += ["", "【用户选中的原文片段】"]
+                parts += [f"- {x}" for x in quotes[:6]]
+            if not t:
+                parts.append("（用户当前没有打开论文，按普通对话回答即可）")
+
             msgs = [{"role": "system", "content": sys_prompt}]
-            # 带上最近几轮对话，保持上下文连贯
-            for h in history[-6:]:
+            for h in history[-8:]:
                 role = "user" if h.get("role") == "user" else "assistant"
-                content = str(h.get("content") or "")[:1500]
+                content = str(h.get("content") or "")[:2000]
                 if content:
                     msgs.append({"role": role, "content": content})
             msgs.append({"role": "user", "content": "\n".join(parts) + "\n\n我的问题：" + q})
+
+
             try:
                 answer = llm.chat(msgs, timeout=120, max_tokens=1200)
             except Exception as exc:
