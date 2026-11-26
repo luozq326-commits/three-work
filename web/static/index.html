@@ -1431,10 +1431,11 @@ async function sendChat(){
       const sel = window.getSelection();
       const text = (sel && sel.toString() || '').trim();
       hide();
-      if(!text || text.length < 4 || !sel.rangeCount) return;
+      if(!text || text.length < 2 || !sel.rangeCount) return;
       const node = sel.anchorNode;
       const host = node && (node.nodeType === 1 ? node : node.parentElement);
-      if(!host || !host.closest('#center')) return;   // 只对正文生效
+      // 正文和右栏（总结/笔记/要素）都能选中引用，对话面板自己除外
+      if(!host || !host.closest('#center, #right')) return;
 
       const rect = sel.getRangeAt(0).getBoundingClientRect();
       btn = document.createElement('button');
@@ -1497,7 +1498,16 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   renderChatMsgs();
   initChatResize();
-  if(location.hash === '#chat') toggleChat(true);   // 支持 /#chat 直接打开对话框
+  if(location.hash === '#chat') toggleChat(true);
+  if(location.hash === '#seltest'){
+    setTimeout(() => {
+      const el = document.querySelector('#right .note-md p');
+      if(!el) return;
+      const r = document.createRange(); r.selectNodeContents(el);
+      const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      document.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
+    }, 1500);
+  }   // 支持 /#chat 直接打开对话框
 });
 
 </script>
