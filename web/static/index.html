@@ -220,10 +220,12 @@ async function health(){
     const h = await api('/api/health');
     const dot = $('#dot');
     dot.className = 'dot ' + (h.ok ? 'on' : 'off');
-    const who = h.label ? `${h.label} · ${h.model}` : h.model;
+    const who = h.label || h.model;
     $('#modelTxt').textContent = h.ok
       ? `${who} · 术语 ${h.terms} 条`
-      : `${who} 不可用（${h.base_url}）`;
+      : `${who} 不可用`;
+    // 模型 ID 和接口地址不放在正文里，鼠标悬停才显示
+    $('#modelTxt').title = [h.model, h.base_url].filter(Boolean).join('\n');
     // 精细解析是否可用，决定「解析」菜单里的档位能不能选
     MINERU_OK = h.mineru !== false;
     applyMineruCapability();
@@ -381,10 +383,9 @@ function renderRead(t, streaming){
       <button onclick="cancelTask()" >停止</button></div>`;
   }else{
     if(t.from_snapshot){
-      const staleTip = t.snapshot_stale ? '（术语库或模型已更新，可按需重译）' : '（直接复用历史结果，零耗时）';
       html += `<div class="warnbox" style="display:flex;align-items:center;gap:12px;
         background:rgba(110,168,254,.08);border-color:rgba(110,168,254,.3);color:var(--text)">
-        <span style="flex:1">已从历史快照秒开${staleTip}</span>
+        <span style="flex:1">已从历史快照秒开${t.snapshot_stale ? '，可按需重译' : ''}</span>
         ${t.pdf ? '<button onclick="rerunCurrent()" >重新解析翻译</button>' : ''}
       </div>`;
     }
