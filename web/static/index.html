@@ -1499,15 +1499,7 @@ document.addEventListener('DOMContentLoaded', () => {
   renderChatMsgs();
   initChatResize();
   if(location.hash === '#chat') toggleChat(true);
-  if(location.hash === '#seltest'){
-    setTimeout(() => {
-      const el = document.querySelector('#right .note-md p');
-      if(!el) return;
-      const r = document.createRange(); r.selectNodeContents(el);
-      const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
-      document.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
-    }, 1500);
-  }   // 支持 /#chat 直接打开对话框
+  // 支持 /#chat 直接打开对话框
 });
 
 </script>
