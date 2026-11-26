@@ -40,6 +40,7 @@ import traceback
 import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from urllib.parse import quote
 from urllib.parse import parse_qs, urlparse
 
@@ -51,6 +52,7 @@ UPLOADS = os.path.join(ROOT, "data", "uploads")
 os.makedirs(UPLOADS, exist_ok=True)
 
 MAX_UPLOAD = 80 * 1024 * 1024  # 80MB，够放一篇带图的论文
+MAX_JSON_BODY = 2 * 1024 * 1024  # JSON 接口的请求体上限，超过直接 413
 
 # 任务表：进程内内存，够用。重启服务即清空，历史结果在 notes 表里
 TASKS: dict[str, dict] = {}
@@ -119,6 +121,70 @@ def _decode_cmd(data: bytes) -> str:
         except UnicodeDecodeError:
             continue
     return data.decode("utf-8", "ignore")
+
+
+def _prune_uploads(keep_days: int = 7, keep_files: int = 120) -> int:
+    """清理上传目录里没人再用的临时文件。
+
+    上传成功会留一份在 data/uploads，久了越堆越多。规则：
+      - 超过 keep_days 天没动过 → 删
+      - 总量超过 keep_files 个 → 从最旧的删
+    笔记里引用过的 PDF 一律不动（否则历史论文的「重新翻译」会失效）。
+    """
+    try:
+        if not os.path.isdir(UPLOADS):
+            return 0
+        keep_names = set()
+        for n in note.list_notes():
+            p = n.get("paper_path") or ""
+            if p:
+                keep_names.add(os.path.basename(p))
+
+        now = time.time()
+        items = []
+        for name in os.listdir(UPLOADS):
+            full = os.path.join(UPLOADS, name)
+            if not os.path.isfile(full):
+                continue
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            items.append((st.st_mtime, name, full))
+
+        items.sort()
+        removed = 0
+        survivors = []
+        for mtime, name, full in items:
+            too_old = (now - mtime) > keep_days * 86400
+            if name in keep_names:
+                survivors.append((mtime, name, full))
+                continue
+            if too_old:
+                try:
+                    os.remove(full)
+                    removed += 1
+                except OSError:
+                    pass
+            else:
+                survivors.append((mtime, name, full))
+
+        # 还超量就继续从最旧的删
+        excess = len(survivors) - keep_files
+        for mtime, name, full in survivors:
+            if excess <= 0:
+                break
+            if name in keep_names:
+                continue
+            try:
+                os.remove(full)
+                removed += 1
+                excess -= 1
+            except OSError:
+                pass
+        return removed
+    except Exception:
+        return 0
 
 
 def _wifi_info() -> dict:
@@ -605,6 +671,11 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         if length <= 0 or length > 2 * 1024 * 1024:
             return {}
+        # 只收 JSON 请求体：跨站表单（text/plain、form-urlencoded）能绕过 CORS 预检，
+        # 直接打到本地接口，所以这里按类型挡一道
+        ctype = (self.headers.get("Content-Type") or "").lower()
+        if ctype and "json" not in ctype:
+            return {}
         raw = self.rfile.read(length)
         try:
             return json.loads(raw.decode("utf-8"))
@@ -709,6 +780,8 @@ class Handler(BaseHTTPRequestHandler):
                     "base_url": cfg.get("base_url"),
                     "terms": len(terms.all_terms()),
                     "target_lng": config.TARGET_LNG,
+                    # 前端据此决定「精细」档能不能选：没装 MinerU 时不该让人点了才报错
+                    "mineru": pdf_parse.mineru_available(),
                 }
             )
             return
@@ -829,6 +902,17 @@ class Handler(BaseHTTPRequestHandler):
             if length > 0 and "application/json" not in ctype:
                 self._json({"error": "Content-Type 须为 application/json"}, 415)
                 return
+            if length > MAX_JSON_BODY:
+                # 先把请求体读掉再回错误：否则连接会被客户端写爆，对方只看到断连
+                left = min(length, 8 * 1024 * 1024)
+                while left > 0:
+                    chunk = self.rfile.read(min(65536, left))
+                    if not chunk:
+                        break
+                    left -= len(chunk)
+                self.close_connection = True
+                self._json({"error": f"请求体过大（上限 {MAX_JSON_BODY // 1024 // 1024}MB）"}, 413)
+                return
 
         if path == "/api/settings":
             data = self._body()
@@ -852,6 +936,92 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "task_id": tid})
             return
 
+        # 就当前论文提问：右下角对话框用
+        if path == "/api/chat":
+            data = self._body()
+            q = (data.get("question") or "").strip()
+            tid = data.get("task_id") or LAST_TASK_ID or ""
+            quotes = [str(x).strip() for x in (data.get("quotes") or []) if str(x).strip()]
+            history = data.get("history") or []
+            if not q:
+                self._json({"error": "问题不能为空"}, 400)
+                return
+            with TASK_LOCK:
+                t = json.loads(json.dumps(TASKS.get(tid) or {}))
+            if not t:
+                self._json({"error": "先打开一篇论文再提问"}, 400)
+                return
+
+            secs = [
+                SimpleNamespace(kind=s.get("kind", ""), text=s.get("text") or "")
+                for s in (t.get("sections") or [])
+            ]
+            ctx = summarize.build_context(secs, 6000) if secs else ""
+            if not ctx.strip():
+                self._json({"error": "这篇论文还没有解析出正文"}, 400)
+                return
+
+            sys_prompt = (
+                "你在帮用户精读一篇英文学术论文。只依据下面的论文正文回答，"
+                "正文没写的一律说「论文里没写」，不要用常识补充，也不要编造数字。\n"
+                "回答要求：中文、简洁、分点；引用原文时用「（第 N 页）」标出页码；"
+                "如果问题超出论文范围，直接说明并给出论文里最接近的相关内容。"
+            )
+            parts = [f"论文标题：{t.get('title') or '未知'}", "", "论文正文节选：", ctx]
+            if quotes:
+                parts += ["", "用户选中的原文片段（回答时优先参考）："]
+                parts += [f"- {s}" for s in quotes[:6]]
+            msgs = [{"role": "system", "content": sys_prompt}]
+            # 带上最近几轮对话，保持上下文连贯
+            for h in history[-6:]:
+                role = "user" if h.get("role") == "user" else "assistant"
+                content = str(h.get("content") or "")[:1500]
+                if content:
+                    msgs.append({"role": role, "content": content})
+            msgs.append({"role": "user", "content": "\n".join(parts) + "\n\n我的问题：" + q})
+            try:
+                answer = llm.chat(msgs, timeout=120, max_tokens=1200)
+            except Exception as exc:
+                self._json({"error": f"回答失败：{exc}"}, 500)
+                return
+            self._json({"answer": answer.strip(), "quotes": len(quotes)})
+            return
+
+        # 公式解读：点正文里的公式，解释它在干什么、每个符号是什么
+        if path == "/api/formula/explain":
+            data = self._body()
+            latex = (data.get("latex") or "").strip()
+            context = (data.get("context") or "").strip()[:1500]
+            if not latex:
+                self._json({"error": "缺少公式内容"}, 400)
+                return
+            sys_prompt = (
+                "你是学术论文的公式讲解助手。只依据给定的公式与上下文回答，"
+                "上下文没写的一律标注「文中未说明」，不要用常识替作者补。\n"
+                "输出 Markdown，严格按三部分：\n"
+                "### 一句话说明\n"
+                "这个公式在做什么，用中文大白话，不超过 60 字。\n"
+                "### 符号表\n"
+                "用 Markdown 表格逐行列出公式里出现的每个符号：| 符号 | 含义 | 在本文中的取值/说明 |\n"
+                "### 为什么这么写\n"
+                "2~4 句，说清这样设计的动机或它解决什么问题。"
+            )
+            user = f"公式 LaTeX：\n{latex}\n\n上下文（公式所在的段落/章节）：\n{context or '（无）'}"
+            try:
+                md = llm.chat(
+                    [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": user},
+                    ],
+                    timeout=90,
+                    max_tokens=900,
+                )
+            except Exception as exc:
+                self._json({"error": f"解读失败：{exc}"}, 500)
+                return
+            self._json({"explain": md, "latex": latex})
+            return
+
         if path == "/api/summary":
             data = self._body()
             tid = data.get("task_id") or LAST_TASK_ID or ""
@@ -860,7 +1030,6 @@ class Handler(BaseHTTPRequestHandler):
             if not t:
                 self._json({"error": "任务不存在"}, 404)
                 return
-            from types import SimpleNamespace
 
             secs = [
                 SimpleNamespace(kind=s.get("kind", ""), text=s.get("text") or "")
@@ -1026,6 +1195,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 os.replace(dest, final)
             self._json({"path": os.path.relpath(final, ROOT).replace("\\", "/"), "name": name})
+            _prune_uploads()  # 顺手清掉过期临时文件，别让目录无限长大
             return
 
         if path == "/api/run":
@@ -1347,6 +1517,9 @@ def main() -> int:
             print(f"[警告] 建检索索引失败：{exc}")
 
     threading.Thread(target=_index, daemon=True).start()
+
+    # 启动时清一次上传缓存（超过 7 天或超过 120 个的旧文件）
+    threading.Thread(target=_prune_uploads, daemon=True).start()
 
     srv = ThreadingHTTPServer((host, args.port), Handler)
     print(f"界面已启动：http://127.0.0.1:{args.port}")

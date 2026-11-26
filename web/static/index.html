@@ -137,6 +137,8 @@
   /* KaTeX 渲染结果：可选中、可缩放，比图片清楚 */
   .eq-render{color:var(--text); font-size:1.05em; overflow-x:auto; padding:4px 0}
   .eq-render .katex{font-size:1.12em}
+  .eq-clickable{cursor:pointer; border-radius:6px; transition:background .15s}
+  .eq-clickable:hover{background:rgba(110,168,254,.10); outline:1px dashed rgba(110,168,254,.45)}
   /* 图片翻译的结果：原文/译文并排 */
   .imgcard{background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:12px}
   .imgcard-h{display:flex; gap:10px; align-items:center}
@@ -204,6 +206,43 @@
   .row{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px}
   .row input{flex:1; min-width:110px}
   .hide{display:none !important}
+  .dd-menu div.disabled{opacity:.45; cursor:not-allowed}
+
+  /* ---------- 右下角提问面板 ---------- */
+  #chatFab{position:fixed; right:20px; bottom:20px; z-index:60; width:46px; height:46px;
+    border-radius:50%; border:1px solid var(--line); background:var(--accent); color:#0b0e13;
+    font-size:15px; font-weight:700; cursor:pointer; box-shadow:0 6px 20px rgba(0,0,0,.35)}
+  #chatFab:hover{filter:brightness(1.08)}
+  #chatFab.active{background:var(--panel); color:var(--text)}
+  #chatPanel{position:fixed; right:20px; bottom:84px; z-index:200; width:390px; max-width:calc(100vw - 40px);
+    height:min(560px, 72vh); display:flex; flex-direction:column;
+    background:#171a21; border:1px solid var(--line); border-radius:12px;
+    box-shadow:0 18px 46px rgba(0,0,0,.5); overflow:hidden}
+  .chat-h{display:flex; align-items:center; gap:8px; padding:9px 12px;
+    border-bottom:1px solid var(--line); font-size:13px; font-weight:600}
+  .chat-h button{padding:2px 9px}
+  #chatMsgs{flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:10px}
+  .chat-tip{color:var(--dim); font-size:12.5px; line-height:1.8}
+  .msg{max-width:92%; padding:8px 11px; border-radius:9px; font-size:13px; line-height:1.8; word-break:break-word}
+  .msg.me{align-self:flex-end; background:rgba(110,168,254,.16); border:1px solid rgba(110,168,254,.3)}
+  .msg.ai{align-self:flex-start; background:#11151b; border:1px solid var(--line)}
+  .msg.ai p{margin:0 0 8px; text-indent:0}
+  .msg.ai p:last-child{margin-bottom:0}
+  .msg.ai ul,.msg.ai ol{padding-left:20px; margin:4px 0 8px}
+  .msg.ai h1,.msg.ai h2,.msg.ai h3{font-size:13px; margin:8px 0 5px; color:var(--accent)}
+  #chatQuotes{display:flex; flex-wrap:wrap; gap:6px; padding:8px 12px; border-top:1px solid var(--line)}
+  .quote-chip{display:inline-flex; align-items:center; gap:6px; max-width:100%;
+    background:#11151b; border:1px solid var(--line); border-radius:6px;
+    padding:3px 7px; font-size:11.5px; color:var(--muted)}
+  .quote-chip b{cursor:pointer; color:var(--dim); font-weight:400}
+  .quote-chip b:hover{color:var(--bad)}
+  .chat-in{display:flex; gap:8px; padding:10px 12px; border-top:1px solid var(--line)}
+  #chatInput{flex:1; resize:none; background:#11151b; color:var(--text); border:1px solid var(--line);
+    border-radius:8px; padding:7px 9px; font-size:13px; line-height:1.6; font-family:inherit}
+  #chatInput:focus{outline:none; border-color:var(--accent)}
+  .sel-quote{position:fixed; z-index:70; padding:4px 10px; font-size:12px; cursor:pointer;
+    background:var(--accent); color:#0b0e13; border:none; border-radius:6px;
+    box-shadow:0 4px 14px rgba(0,0,0,.4)}
   .toast{position:fixed; bottom:22px; left:50%; transform:translateX(-50%) translateY(20px);
     background:var(--panel-2); border:1px solid var(--line); color:var(--text);
     padding:9px 16px; border-radius:8px; opacity:0; transition:.25s; pointer-events:none; z-index:99}
@@ -230,7 +269,7 @@
     <button class="dd-btn" onclick="toggleDD('ddParse')">解析：<b id="parseLabel">快速</b> ▾</button>
     <div class="dd-menu">
       <div data-v="auto" onclick="pickParse('auto')">快速（PyMuPDF，约 10 秒）</div>
-      <div data-v="mineru" onclick="pickParse('mineru')">精细（MinerU，约 30~60 秒/篇）</div>
+      <div data-v="mineru" id="optMineru" onclick="pickParse('mineru')">精细（MinerU，约 30~60 秒/篇）</div>
     </div>
   </div>
   <div class="dd" id="ddModel">
@@ -313,7 +352,26 @@ function pickRange(v){
   closeDD();
 }
 
+let MINERU_OK = true;   // 由 /api/health 回填
+
+function applyMineruCapability(){
+  const el = document.getElementById('optMineru');
+  if(!el) return;
+  if(MINERU_OK){
+    el.classList.remove('disabled');
+    el.title = '';
+  }else{
+    el.classList.add('disabled');
+    el.title = '未检测到 .venv-mineru，按 README 装好精细解析后再选';
+  }
+}
+
 function pickParse(v){
+  if(v === 'mineru' && !MINERU_OK){
+    toast('精细解析未安装：需要 .venv-mineru 与 835MB 模型，见 README「可选：MinerU 精细解析」', 6000);
+    closeDD();
+    return;
+  }
   PARSE = v;
   $('#parseLabel').textContent = PARSE_LABEL[v] || v;
   closeDD();
@@ -404,6 +462,9 @@ async function health(){
     $('#modelTxt').textContent = h.ok
       ? `${who} · 术语 ${h.terms} 条`
       : `${who} 不可用（${h.base_url}）`;
+    // 精细解析是否可用，决定「解析」菜单里的档位能不能选
+    MINERU_OK = h.mineru !== false;
+    applyMineruCapability();
   }catch(e){
     $('#dot').className='dot off'; $('#modelTxt').textContent='服务异常';
   }
@@ -659,12 +720,16 @@ function renderRead(t, streaming){
   center.querySelectorAll('.eq-render').forEach(el => {
     const tex = EQ_TEX[Number(el.dataset.eq)];
     if(!tex) return;
+    el.classList.add('eq-clickable');
+    el.title = '点击解读这个公式';
+    el.onclick = () => explainFormula(tex, el);
     if(window.katex){
       try{ katex.render(tex, el, {displayMode:true, throwOnError:false, strict:false}); return; }
       catch(e){ /* 落到下面的源码显示 */ }
     }
     const code = document.createElement('code');
     code.textContent = tex;
+    code.onclick = () => explainFormula(tex, el);
     el.replaceWith(code);
   });
   // 支持 #sec-5 这类锚点：内容渲染完再滚，否则浏览器找不到节点
@@ -1042,6 +1107,47 @@ function mdToHtml(md){
     }
   });
 })();
+
+/* ---------- 公式解读 ---------- */
+async function explainFormula(tex, el){
+  const card = el && (el.closest('.card-b') || el.closest('.card'));
+  // 带上公式所在卡片的正文当上下文，模型才知道这篇论文里符号指什么
+  const ctx = (card ? card.innerText : '').slice(0, 1200);
+  $('#modalTitle').textContent = '公式解读';
+  $('#modalBody').innerHTML = `
+    <div style="background:#11151b;border:1px solid var(--line);border-radius:8px;
+      padding:12px;margin-bottom:14px;overflow-x:auto">
+      <div id="eqPreview"></div>
+    </div>
+    <div id="eqExp" style="color:var(--muted);font-size:13px">正在解读…（约 5~15 秒）</div>`;
+  $('#mask').classList.add('show');
+
+  const pv = $('#eqPreview');
+  if(window.katex){
+    try{ katex.render(tex, pv, {displayMode:true, throwOnError:false, strict:false}); }
+    catch(e){ pv.textContent = tex; }
+  }else{
+    pv.textContent = tex;
+  }
+
+  const box = $('#eqExp');
+  let r = {};
+  try{
+    r = await api('/api/formula/explain', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({latex: tex, context: ctx})});
+  }catch(err){
+    box.innerHTML = `<span style="color:var(--bad)">请求失败：${escapeHtml(String(err))}</span>`;
+    return;
+  }
+  if(r.error){
+    box.innerHTML = `<span style="color:var(--bad)">${escapeHtml(r.error)}</span>`;
+    return;
+  }
+  box.className = 'note-md';
+  box.style.color = '';
+  box.innerHTML = mdToHtml(r.explain || '');
+}
 
 /* ---------- 跨文献检索 ---------- */
 $('#btnSearch').onclick = () => {
@@ -1431,6 +1537,161 @@ async function restore(){
 }
 
 health(); loadSettings(); restore(); setInterval(health, 15000);
+
+/* ---------- 右下角：就这篇论文提问 ---------- */
+let CHAT = { open:false, quotes:[], history:[], busy:false };
+
+function toggleChat(force){
+  CHAT.open = force === undefined ? !CHAT.open : !!force;
+  $('#chatPanel').classList.toggle('hide', !CHAT.open);
+  $('#chatFab').classList.toggle('active', CHAT.open);
+  $('#chatFab').textContent = CHAT.open ? '×' : '问';
+  if(CHAT.open) setTimeout(() => $('#chatInput').focus(), 60);
+}
+
+function addChatQuote(text){
+  const t = (text || '').trim();
+  if(!t) return;
+  if(CHAT.quotes.includes(t)) { toggleChat(true); return toast('这句已经在对话里了'); }
+  if(CHAT.quotes.length >= 6) return toast('最多引用 6 段，先删掉几段');
+  CHAT.quotes.push(t.slice(0, 600));
+  renderChatQuotes();
+  toggleChat(true);
+  toast('已加入对话引用');
+}
+
+function renderChatQuotes(){
+  const box = $('#chatQuotes');
+  if(!box) return;
+  box.classList.toggle('hide', CHAT.quotes.length === 0);
+  box.innerHTML = CHAT.quotes.map((q, i) => `
+    <span class="quote-chip" title="${escapeHtml(q)}">
+      ${escapeHtml(q.slice(0, 28))}${q.length > 28 ? '…' : ''}
+      <b onclick="removeChatQuote(${i})">×</b>
+    </span>`).join('');
+}
+
+function removeChatQuote(i){
+  CHAT.quotes.splice(i, 1);
+  renderChatQuotes();
+}
+
+function renderChatMsgs(){
+  const box = $('#chatMsgs');
+  if(!box) return;
+  if(!CHAT.history.length){
+    box.innerHTML = `<div class="chat-tip">就这篇论文提问。正文里选中一句话，点「加入对话」可以带着原文问。</div>`;
+    return;
+  }
+  box.innerHTML = CHAT.history.map(m => `
+    <div class="msg ${m.role === 'user' ? 'me' : 'ai'}">
+      ${m.role === 'assistant' ? mdToHtml(m.content) : escapeHtml(m.content)}
+    </div>`).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+function clearChat(){
+  CHAT.history = []; CHAT.quotes = [];
+  renderChatMsgs(); renderChatQuotes();
+}
+
+async function sendChat(){
+  if(CHAT.busy) return;
+  const input = $('#chatInput');
+  const q = (input.value || '').trim();
+  if(!q) return;
+  if(!task) return toast('先打开一篇论文');
+  input.value = '';
+  CHAT.history.push({role:'user', content:q});
+  renderChatMsgs();
+
+  CHAT.busy = true;
+  const msgs = $('#chatMsgs');
+  msgs.insertAdjacentHTML('beforeend', '<div class="msg ai" id="chatPending">正在读论文…</div>');
+  msgs.scrollTop = msgs.scrollHeight;
+  try{
+    const r = await api('/api/chat', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        task_id: task.id,
+        question: q,
+        quotes: CHAT.quotes,
+        history: CHAT.history.slice(0, -1).slice(-6),
+      })});
+    const pend = $('#chatPending');
+    if(pend) pend.remove();
+    if(r.error){ toast(r.error, 5000); CHAT.history.pop(); renderChatMsgs(); return; }
+    CHAT.history.push({role:'assistant', content:r.answer || ''});
+    renderChatMsgs();
+  }catch(err){
+    const pend = $('#chatPending');
+    if(pend) pend.remove();
+    toast('请求失败：' + String(err), 5000);
+    CHAT.history.pop(); renderChatMsgs();
+  }finally{
+    CHAT.busy = false;
+  }
+}
+
+// 选中正文文字 → 浮出「加入对话」
+(function initSelectionQuote(){
+  let btn = null;
+  const hide = () => { if(btn){ btn.remove(); btn = null; } };
+  document.addEventListener('mouseup', () => {
+    setTimeout(() => {
+      const sel = window.getSelection();
+      const text = (sel && sel.toString() || '').trim();
+      hide();
+      if(!text || text.length < 4 || !sel.rangeCount) return;
+      const node = sel.anchorNode;
+      const host = node && (node.nodeType === 1 ? node : node.parentElement);
+      if(!host || !host.closest('#center')) return;   // 只对正文生效
+
+      const rect = sel.getRangeAt(0).getBoundingClientRect();
+      btn = document.createElement('button');
+      btn.className = 'sel-quote';
+      btn.textContent = '加入对话';
+      btn.style.left = Math.min(window.innerWidth - 110, Math.max(8, rect.left + rect.width / 2 - 44)) + 'px';
+      btn.style.top = Math.max(8, rect.top - 38) + 'px';
+      btn.onmousedown = ev => { ev.preventDefault(); ev.stopPropagation(); };
+      btn.onclick = ev => { ev.stopPropagation(); addChatQuote(text); hide(); };
+      document.body.appendChild(btn);
+    }, 10);
+  });
+  document.addEventListener('mousedown', e => {
+    if(btn && e.target !== btn) hide();
+  });
+})();
+
+// 面板 DOM 在 script 之后，等解析完再绑事件
+document.addEventListener('DOMContentLoaded', () => {
+  $('#chatFab').onclick = () => toggleChat();
+  $('#chatClose').onclick = () => toggleChat(false);
+  $('#chatSend').onclick = sendChat;
+  $('#chatInput').addEventListener('keydown', e => {
+    if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); sendChat(); }
+  });
+  renderChatMsgs();
+  if(location.hash === '#chat') toggleChat(true);   // 支持 /#chat 直接打开对话框
+});
+
 </script>
+
+<button id="chatFab" title="就这篇论文提问">问</button>
+<div id="chatPanel" class="hide">
+  <div class="chat-h">
+    <span>问论文</span>
+    <span style="flex:1"></span>
+    <button onclick="clearChat()" style="padding:2px 8px">清空</button>
+    <button id="chatClose" style="padding:2px 9px">×</button>
+  </div>
+  <div id="chatMsgs"></div>
+  <div id="chatQuotes" class="hide"></div>
+  <div class="chat-in">
+    <textarea id="chatInput" rows="2"
+      placeholder="就这篇论文提问；正文里选中文字可「加入对话」。Enter 发送，Shift+Enter 换行"></textarea>
+    <button id="chatSend" class="primary">发送</button>
+  </div>
+</div>
 </body>
 </html>

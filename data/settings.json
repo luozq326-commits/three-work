@@ -24,10 +24,10 @@
    "disable_thinking": true
   },
   "custom": {
-   "label": "自定义 OpenAI 兼容",
+   "label": "自定义",
    "backend": "openai",
-   "base_url": "",
-   "model": "",
+   "base_url": "https://example.com/v1",
+   "model": "test-model",
    "api_key": ""
   }
  }

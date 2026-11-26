@@ -23,6 +23,8 @@
 | 翻译缓存 | 段落级缓存，同一篇重跑秒出；改术语库或换模型后自动失效 |
 | 模型可切换 | 本机 Ollama / DeepSeek / 豆包（火山方舟）/ 自定义 OpenAI 兼容 |
 | 图片翻译 | 选图 / 拖拽 / Ctrl+V 粘贴，本机 OCR（支持双栏重排）后直接出原文+译文对照，历史记录自动落库可回看与删除 |
+| 公式解读 | 点正文里的公式，弹出「一句话说明 + 符号表 + 为什么这么写」，只依据上下文不编 |
+| 问论文 | 右下角对话框就当前论文提问，正文选中一句话可「加入对话」带着原文问，回答标注页码 |
 
 ## 快速开始
 
@@ -80,6 +82,7 @@ python -m venv .venv-mineru
 python demo.py data/papers/resnet.pdf                  # 只翻摘要
 python demo.py data/papers/resnet.pdf --sections all   # 全文
 python eval.py                                         # 多篇评测，输出 out/eval.md
+python security_test.py                                # 20 项安全与健壮性回归（需先启动服务）
 ```
 
 ## 目录结构
@@ -101,6 +104,7 @@ web_server.py    本地网页服务（仅标准库 http.server）
 web/static/      index.html（桌面三栏）、mobile.html（手机拍照）
 demo.py          端到端命令行
 eval.py          多篇论文评测
+security_test.py 20 项安全回归（同源、路径穿越、请求体边界、Key 清理等）
 warmup.py        演示前预热
 ```
 
