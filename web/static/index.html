@@ -837,8 +837,8 @@ function mdToHtml(md){
       lw = Math.round(lw * ratio);
       rw = Math.round(rw * ratio);
     }
-    if (lw) main.style.setProperty('--lw', Math.max(170, lw) + 'px');
-    if (rw) main.style.setProperty('--rw', Math.max(170, rw) + 'px');
+    if (lw) document.documentElement.style.setProperty('--lw', Math.max(170, lw) + 'px');
+    if (rw) document.documentElement.style.setProperty('--rw', Math.max(170, rw) + 'px');
   };
   fit();
 
@@ -864,7 +864,7 @@ function mdToHtml(md){
       const move = ev => {
         const delta = side === 'left' ? (ev.clientX - startX) : (startX - ev.clientX);
         const w = clamp(startW + delta, side);
-        main.style.setProperty(prop, w + 'px');
+        document.documentElement.style.setProperty(prop, w + 'px');
       };
       const up = () => {
         bar.classList.remove('dragging');
@@ -886,8 +886,8 @@ function mdToHtml(md){
     const rw = parseInt(getComputedStyle(main).getPropertyValue('--rw')) || 390;
     if(lw + rw + 360 > main.clientWidth - 10){
       const ratio = (main.clientWidth - 10 - 360) / (lw + rw);
-      main.style.setProperty('--lw', Math.max(MIN, Math.round(lw * ratio)) + 'px');
-      main.style.setProperty('--rw', Math.max(MIN, Math.round(rw * ratio)) + 'px');
+      document.documentElement.style.setProperty('--lw', Math.max(MIN, Math.round(lw * ratio)) + 'px');
+      document.documentElement.style.setProperty('--rw', Math.max(MIN, Math.round(rw * ratio)) + 'px');
     }
   });
 })();
@@ -1329,6 +1329,7 @@ function toggleChat(force){
   CHAT.open = force === undefined ? !CHAT.open : !!force;
   $('#chatPanel').classList.toggle('hide', !CHAT.open);
   $('#chatFab').classList.toggle('active', CHAT.open);
+  $('#chatFab').classList.toggle('hidden', CHAT.open);
   $('#chatFab').textContent = CHAT.open ? '×' : '问';
   syncChatCtx();
   if(CHAT.open) setTimeout(() => $('#chatInput').focus(), 60);
