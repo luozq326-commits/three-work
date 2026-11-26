@@ -1451,6 +1451,41 @@ async function sendChat(){
   });
 })();
 
+// 面板高度拖拽：记在浏览器里，下次打开还是这个高度
+function initChatResize(){
+  const panel = document.getElementById('chatPanel');
+  const bar = document.getElementById('chatResize');
+  if(!panel || !bar) return;
+  const saved = parseInt(localStorage.getItem('pr_chat_h') || '', 10);
+  if(saved) panel.style.setProperty('--chat-h', saved + 'px');
+
+  bar.addEventListener('mousedown', e => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = panel.getBoundingClientRect().height;
+    document.body.classList.add('resizing-y');
+    const move = ev => {
+      // 往上拖变高：delta 用 startY - clientY
+      const h = Math.min(window.innerHeight - 96, Math.max(240, startH + (startY - ev.clientY)));
+      panel.style.setProperty('--chat-h', h + 'px');
+    };
+    const up = () => {
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+      document.body.classList.remove('resizing-y');
+      localStorage.setItem('pr_chat_h', Math.round(panel.getBoundingClientRect().height));
+    };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  });
+
+  // 双击恢复默认高度
+  bar.addEventListener('dblclick', () => {
+    panel.style.removeProperty('--chat-h');
+    localStorage.removeItem('pr_chat_h');
+  });
+}
+
 // 面板 DOM 在 script 之后，等解析完再绑事件
 document.addEventListener('DOMContentLoaded', () => {
   $('#chatFab').onclick = () => toggleChat();
@@ -1460,6 +1495,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); sendChat(); }
   });
   renderChatMsgs();
+  initChatResize();
   if(location.hash === '#chat') toggleChat(true);   // 支持 /#chat 直接打开对话框
 });
 
@@ -1467,6 +1503,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 <button id="chatFab" title="就这篇论文提问">问</button>
 <div id="chatPanel" class="hide">
+  <div class="chat-resize" id="chatResize" title="上下拖动调整高度，双击恢复默认"></div>
   <div class="chat-h">
     <span class="who"><i></i>AI 助手</span>
     <span class="ctx" id="chatCtx">· 已加载当前论文与总结</span>
